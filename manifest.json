@@ -1,0 +1,13 @@
+{
+"display":"standalone",
+"scope":"",
+"name":"Password Vault",
+"short_name":"Password Vault",
+"description":"",
+"start_url":".",
+"background_color":"#ffffff",
+"theme_color":"#eeeeee",
+"icons":[
+    {"src":"icon.png","sizes":"48x48","type":"image\/png"}
+]
+}

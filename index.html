@@ -1,0 +1,1444 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<title>Password Vault</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, minimum-scale=1"/>
+<meta name="theme-color" content="#111318">
+<script src="javascript.js"></script>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:          #111318;
+  --surface:     #1a1d27;
+  --card:        #20232f;
+  --elevated:    #272b3a;
+  --border:      #2d3147;
+  --border-2:    #3d4260;
+  --text:        #dde1f0;
+  --text-2:      #8b90a8;
+  --text-3:      #4d5168;
+  --accent:      #4d8eff;
+  --accent-h:    #6ba3ff;
+  --danger:      #ff5c5c;
+  --danger-h:    #ff7a7a;
+  --green:       #3fcf8e;
+  --mono:        'SF Mono','Cascadia Code','Fira Mono',Consolas,monospace;
+  --r:           6px;
+  --shadow:      0 8px 24px rgba(0,0,0,.5);
+}
+
+/* overflow-anchor: the browser's automatic scroll anchoring would also
+   compensate when the fixed panel resizes (notes row shown/hidden), doubling
+   the manual scrollBy() compensation in setNotes() — disable it so only the
+   deterministic JS compensation runs. */
+html { background: var(--bg); overflow-anchor: none; }
+
+body {
+  background: var(--bg);
+  overflow-anchor: none;
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  max-width: 480px;
+  margin: 0 auto;
+  min-height: 100vh;
+  scrollbar-color: var(--elevated) var(--bg);
+  scrollbar-width: thin;
+}
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--elevated); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--border-2); }
+
+/* ─── Fixed decode panel ─────────────────────────────────── */
+#fixedDiv {
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  margin: 0 auto;
+  width: 100%; max-width: 480px;
+  z-index: 200;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  box-shadow: var(--shadow);
+}
+
+.p-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.p-row:last-child { border-bottom: none; }
+
+#decname {
+  font-weight: 600;
+  font-size: 15px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-height: 1.4em;
+  color: var(--text);
+}
+#decname a { color: var(--accent); text-decoration: none; }
+#decname a:hover { text-decoration: underline; }
+
+.del-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-2);
+  font-size: 16px;
+  padding: 3px 5px;
+  border-radius: var(--r);
+  transition: color .15s, background .15s;
+  line-height: 1;
+}
+.del-btn:hover { color: var(--danger); background: rgba(255,92,92,.1); }
+
+.edit-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-2);
+  font-size: 15px;
+  padding: 3px 5px;
+  border-radius: var(--r);
+  transition: color .15s, background .15s;
+  line-height: 1;
+}
+.edit-btn:hover { color: var(--accent); background: rgba(77,142,255,.1); }
+
+.field {
+  flex: 1;
+  min-width: 0;
+  cursor: pointer;
+  user-select: none;
+}
+.field:hover .fval { color: var(--accent); }
+
+.flbl {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .07em;
+  color: var(--text-2);
+  display: block;
+  margin-bottom: 1px;
+}
+.fval {
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--text);
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-height: 1.4em;
+  transition: color .15s;
+}
+
+.otp-col {
+  flex-shrink: 0;
+  min-width: 108px;
+  cursor: pointer;
+  user-select: none;
+}
+.otp-col:hover #otp { color: var(--accent-h); }
+.otp-lbl {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .07em;
+  color: var(--text-2);
+  display: block;
+  margin-bottom: 1px;
+}
+#otp {
+  font-family: var(--mono);
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: .18em;
+  color: var(--green);
+  display: block;
+  transition: color .15s;
+}
+#updatingIn { font-weight: 400; font-size: 11px; }
+
+#decnotes {
+  width: 100%;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  color: var(--text-2);
+  font-family: var(--mono);
+  font-size: 12px;
+  padding: 3px 8px;
+  resize: none;
+  outline: none;
+  line-height: 1.5;
+  overflow: hidden;
+  min-height: calc(1.5em + 6px);
+}
+#decnotes:focus { border-color: var(--border-2); }
+
+/* ─── Scrollable body ─────────────────────────────────────── */
+#content {
+  padding: 12px;
+}
+
+/* ─── Control bar ─────────────────────────────────────────── */
+.controls {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.key-wrap {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  padding: 0 8px;
+  gap: 6px;
+  transition: border-color .15s;
+}
+.key-wrap:focus-within { border-color: var(--accent); }
+
+.key-icon { font-size: 14px; flex-shrink: 0; }
+
+#aeskey, #aeskey2 {
+  flex: 1;
+  width: 0;
+  background: none;
+  border: none;
+  outline: none;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 13px;
+  padding: 8px 0;
+}
+#aeskey::placeholder, #aeskey2::placeholder { color: var(--text-3); font-family: inherit; font-size: 13px; }
+
+.eye-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-3);
+  font-size: 14px;
+  padding: 2px;
+  line-height: 1;
+  flex-shrink: 0;
+  transition: color .15s;
+}
+.eye-btn:hover { color: var(--text-2); }
+
+.btn {
+  border: none;
+  border-radius: var(--r);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  padding: 8px 14px;
+  white-space: nowrap;
+  transition: background .15s, color .15s, opacity .15s;
+  line-height: 1.3;
+}
+.btn-ghost {
+  background: var(--card);
+  color: var(--text-2);
+  border: 1px solid var(--border);
+}
+.btn-ghost:hover { background: var(--elevated); color: var(--text); }
+
+.btn-accent {
+  background: var(--accent);
+  color: #fff;
+}
+.btn-accent:hover { background: var(--accent-h); }
+
+/* ─── Reveal progress bar ─────────────────────────────────── */
+#reveal-progress {
+  height: 3px;
+  background: var(--border);
+  border-radius: 2px;
+  margin-bottom: 10px;
+  overflow: hidden;
+}
+#reveal-progress-fill {
+  height: 100%;
+  width: 0%;
+  background: var(--accent);
+  transition: width 0.1s linear;
+  border-radius: 2px;
+}
+
+/* ─── Entry grid ──────────────────────────────────────────── */
+.entry-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.entry-btn {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  padding: 10px 12px;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: background .15s, border-color .15s, color .15s;
+}
+.entry-btn:hover {
+  background: var(--elevated);
+  border-color: var(--border-2);
+}
+
+/* ─── New entry card ──────────────────────────────────────── */
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  overflow: hidden;
+  margin-top: 12px;
+}
+
+.card-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .07em;
+  color: var(--text-2);
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.frow {
+  display: flex;
+  align-items: center;
+  padding: 9px 14px;
+  border-bottom: 1px solid var(--border);
+  gap: 10px;
+}
+.frow:last-of-type { border-bottom: none; }
+
+.flabel {
+  font-size: 12px;
+  color: var(--text-2);
+  width: 74px;
+  flex-shrink: 0;
+}
+.finput {
+  flex: 1;
+  background: none;
+  border: none;
+  outline: none;
+  color: var(--text);
+  font-size: 13px;
+  font-family: inherit;
+  min-width: 0;
+  padding: 1px 0;
+}
+.finput::placeholder { color: var(--text-3); }
+
+.pw-row { display: flex; align-items: center; gap: 6px; }
+#pw-gen-btns { display: flex; gap: 6px; flex-shrink: 0; }
+.pw-col { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.pw-frow { align-items: flex-start; }
+.pw-frow .flabel { padding-top: 5px; }
+.pw-strength-wrap { display: flex; align-items: center; gap: 8px; padding: 5px 0 2px; }
+.pw-segs { display: flex; gap: 4px; }
+.pw-seg { width: 36px; height: 4px; border-radius: 2px; background: var(--border); transition: background .25s; }
+.pw-strength-lbl { font-size: 11px; font-weight: 600; font-family: var(--mono); transition: color .25s; }
+.pw-entropy-lbl { font-size: 11px; color: var(--text-3); font-family: var(--mono); margin-left: auto; }
+
+.btn-sm {
+  background: var(--elevated);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-2);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 500;
+  padding: 3px 8px;
+  flex-shrink: 0;
+  transition: background .15s, color .15s;
+  white-space: nowrap;
+}
+.btn-sm:hover { background: var(--border-2); color: var(--text); }
+.btn-sm:disabled { opacity: .3; cursor: default; }
+
+.fnotes {
+  width: 100%;
+  background: none;
+  border: none;
+  outline: none;
+  color: var(--text);
+  font-size: 13px;
+  font-family: inherit;
+  resize: vertical;
+  padding: 1px 0;
+  min-height: 56px;
+}
+
+.card-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 14px;
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+}
+
+/* ─── Generator settings ──────────────────────────────────── */
+.gen-card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  padding: 12px 14px;
+  margin-top: 8px;
+}
+.gen-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .07em;
+  color: var(--text-2);
+  margin-bottom: 10px;
+}
+.gen-grid {
+  display: grid;
+  grid-template-columns: 20px auto 1fr;
+  align-items: center;
+  column-gap: 8px;
+  row-gap: 6px;
+  margin-bottom: 10px;
+  color: var(--text-2);
+  font-size: 13px;
+}
+#charset { display: contents; }
+.gen-grid label { cursor: pointer; }
+.gen-grid input[type=checkbox],
+.gen-grid input[type=radio] { accent-color: var(--accent); cursor: pointer; }
+.gen-grid .sym-chars { font-family: monospace; font-size: 11px; opacity: 0.7; letter-spacing: 1px; }
+#customchars {
+  background: var(--elevated);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  font-size: 12px;
+  font-family: var(--mono);
+  padding: 3px 8px;
+  width: 130px;
+  outline: none;
+}
+#customchars:focus { border-color: var(--accent); }
+.val-cell { display: flex; align-items: center; gap: 6px; }
+.val-cell input[type=number] {
+  width: 54px;
+  background: var(--elevated);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  font-size: 13px;
+  padding: 2px 6px;
+  outline: none;
+}
+.val-cell input[type=number]:focus { border-color: var(--accent); }
+
+#statistics {
+  font-size: 11px;
+  color: var(--text-2);
+  margin: 8px 0 6px;
+  min-height: 1.4em;
+}
+.ent-note { font-size: 11px; color: var(--text-3); margin-top: 4px; }
+.ent-note a { color: var(--text-3); }
+.ent-note code { font-family: var(--mono); }
+
+/* ─── Toast notification ─────────────────────────────────── */
+#toast {
+  position: fixed;
+  bottom: 28px;
+  left: 50%;
+  transform: translateX(-50%) translateY(8px);
+  background: var(--elevated);
+  border: 1px solid var(--border-2);
+  border-radius: 20px;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 500;
+  padding: 7px 16px;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity .18s ease, transform .18s ease;
+  white-space: nowrap;
+  z-index: 9999;
+  box-shadow: 0 4px 16px rgba(0,0,0,.45);
+}
+#toast.show {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
+/* ─── Button click flash ──────────────────────────────────── */
+@keyframes btn-blink {
+    0%   { box-shadow: 0 0 0 3px rgba(77,142,255,.5), 0 0 12px rgba(77,142,255,.25); }
+    100% { box-shadow: 0 0 0 0   rgba(77,142,255,0);                                  }
+}
+@keyframes entry-blink {
+    0%   { background: var(--elevated); border-color: var(--accent);
+           color: var(--accent-h);
+           box-shadow: 0 0 0 3px rgba(77,142,255,.35), 0 0 10px rgba(77,142,255,.2); }
+    100% { background: var(--card);    border-color: var(--border);
+           color: var(--text);
+           box-shadow: none; }
+}
+.btn-flash            { animation: btn-blink   500ms ease-out forwards; }
+.entry-btn.btn-flash  { animation: entry-blink 500ms ease-out forwards; }
+
+/* ─── TOTP ring ───────────────────────────────────────────── */
+.otp-display { display: flex; align-items: center; gap: 6px; }
+#otp-ring    { flex-shrink: 0; display: none; }
+
+/* ─── Copy flash on field/token click ────────────────────── */
+@keyframes field-flash {
+  0%   { background: rgba(77,142,255,.18); border-radius: 4px; }
+  100% { background: transparent; }
+}
+.copy-flash { animation: field-flash 600ms ease-out forwards; }
+
+/* ─── Entry count ─────────────────────────────────────────── */
+#entry-count {
+  font-size: 11px;
+  color: var(--text-2);
+  text-align: right;
+  margin-bottom: 6px;
+}
+
+/* ─── Search overlay ──────────────────────────────────────── */
+#search-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,.55);
+  z-index: 400;
+  display: none;
+  align-items: flex-start;
+  justify-content: center;
+}
+#search-overlay.open { display: flex; }
+#search-box {
+  background: var(--surface);
+  border: 1px solid var(--border-2);
+  border-radius: var(--r);
+  box-shadow: 0 8px 32px rgba(0,0,0,.6);
+  width: calc(100% - 24px);
+  max-width: 456px;
+  max-height: 70vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+#search-input {
+  background: var(--card);
+  border: none;
+  border-bottom: 1px solid var(--border);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 14px;
+  outline: none;
+  padding: 12px 14px;
+  width: 100%;
+  box-sizing: border-box;
+}
+#search-input::placeholder { color: var(--text-2); }
+#search-count {
+  font-size: 11px;
+  color: var(--text-2);
+  padding: 4px 14px;
+  text-align: right;
+  min-height: 0;
+  line-height: 1.4;
+}
+#search-count:empty { display: none; }
+#search-results {
+  overflow-y: auto;
+  scrollbar-color: var(--elevated) var(--surface);
+  scrollbar-width: thin;
+  padding: 8px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+#search-results::-webkit-scrollbar-track { background: var(--surface); }
+#search-no-match {
+  grid-column: 1 / -1;
+  color: var(--text-2);
+  font-size: 13px;
+  padding: 16px;
+  text-align: center;
+}
+
+/* ─── Auto-lock warning ───────────────────────────────────── */
+#lock-warning {
+  position: fixed;
+  bottom: 28px;
+  left: 50%;
+  transform: translateX(-50%) translateY(12px);
+  background: rgba(255,160,0,.1);
+  border: 1px solid rgba(255,160,0,.45);
+  border-radius: 20px;
+  color: #ffb347;
+  font-size: 13px;
+  font-weight: 500;
+  padding: 7px 14px;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity .2s, transform .2s;
+  white-space: nowrap;
+  z-index: 9998;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+#lock-warning.show { opacity: 1; transform: translateX(-50%) translateY(0); pointer-events: auto; }
+#lock-stay {
+  background: rgba(255,160,0,.2);
+  border: 1px solid rgba(255,160,0,.5);
+  border-radius: 12px;
+  color: #ffb347;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 2px 10px;
+}
+#lock-stay:hover { background: rgba(255,160,0,.35); }
+
+/* ─── Edit-form notes auto-resize ────────────────────────── */
+#notes { overflow: hidden; }
+
+/* ─── Custom tooltips ──────────────────────────────────────── */
+[data-tip] { position: relative; }
+[data-tip]::after {
+  content: attr(data-tip);
+  position: absolute;
+  bottom: calc(100% + 7px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--elevated);
+  border: 1px solid var(--border-2);
+  border-radius: 4px;
+  color: var(--text);
+  font-size: 11px;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+  font-weight: 400;
+  padding: 4px 9px;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity .15s 1.20s;
+  z-index: 9500;
+  box-shadow: 0 2px 8px rgba(0,0,0,.45);
+}
+[data-tip]:hover::after { opacity: 1; }
+#fixedDiv [data-tip]::after,
+.ctrl-form [data-tip]::after { bottom: auto; top: calc(100% + 7px); }
+.del-btn[data-tip]::after,
+.edit-btn[data-tip]::after,
+#about-btn[data-tip]::after { left: auto; right: 0; transform: none; }
+
+/* ─── About modal ──────────────────────────────────────────── */
+#about-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,.65);
+  z-index: 800;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 12px;
+}
+#about-overlay.open { display: flex; }
+#about-box {
+  background: var(--surface);
+  border: 1px solid var(--border-2);
+  border-radius: var(--r);
+  box-shadow: 0 12px 40px rgba(0,0,0,.7);
+  width: 100%;
+  max-width: 440px;
+  max-height: 82vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+#about-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--card);
+  flex-shrink: 0;
+}
+#about-header h2 {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  margin: 0;
+}
+#about-close {
+  background: none;
+  border: none;
+  color: var(--text-2);
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: 4px;
+  transition: color .15s, background .15s;
+}
+#about-close:hover { color: var(--text); background: var(--elevated); }
+#about-body {
+  overflow-y: auto;
+  padding: 14px 16px;
+  font-size: 12.5px;
+  line-height: 1.65;
+  color: var(--text-2);
+  scrollbar-color: var(--elevated) var(--surface);
+  scrollbar-width: thin;
+}
+#about-body::-webkit-scrollbar { width: 6px; }
+#about-body::-webkit-scrollbar-track { background: var(--surface); }
+#about-body::-webkit-scrollbar-thumb { background: var(--elevated); border-radius: 3px; }
+#about-body::-webkit-scrollbar-thumb:hover { background: var(--border-2); }
+.about-section {
+  margin-bottom: 14px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--border);
+}
+.about-section:last-child { margin-bottom: 0; border-bottom: none; padding-bottom: 0; }
+.about-section h3 {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .08em;
+  color: var(--green);
+  margin-bottom: 6px;
+}
+.about-section p { margin-bottom: 3px; }
+.about-section p:last-child { margin-bottom: 0; }
+.lib-table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 12px; }
+.lib-table td { vertical-align: top; padding: 4px 8px 4px 0; border-top: 1px solid var(--border); }
+.lib-table tr:first-child td { border-top: none; }
+.lib-table .lt-pkg { font-family: var(--mono); color: var(--text); white-space: nowrap; padding-right: 10px; width: 1%; }
+.lib-table .lt-ver { font-family: var(--mono); font-size: 10px; color: var(--text-3); }
+.lib-table .lt-use { color: var(--text-2); white-space: nowrap; padding-right: 10px; width: 1%; }
+.lib-table .lt-info { color: var(--text-2); }
+.lib-table .lt-info a { color: var(--accent); text-decoration: none; }
+.lib-table .lt-info a:hover { color: var(--accent-h); text-decoration: underline; }
+.standards-grid {
+  display: grid;
+  grid-template-columns: max-content max-content 1fr;
+  column-gap: 10px;
+  row-gap: 3px;
+  margin-top: 6px;
+  font-size: 12px;
+  align-items: baseline;
+}
+.sg-name { font-family: var(--mono); color: var(--text); white-space: nowrap; }
+.sg-met { color: #3fcf8e; font-weight: 600; white-space: nowrap; }
+.sg-partial { color: #f5a623; font-weight: 600; white-space: nowrap; }
+.sg-desc { color: var(--text-2); }
+.about-section code {
+  font-family: var(--mono);
+  font-size: 11px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 1px 5px;
+  color: var(--text);
+}
+.about-section strong { color: var(--text); font-weight: 600; }
+.about-section a { color: var(--accent); text-decoration: none; }
+.about-section a:hover { color: var(--accent-h); text-decoration: underline; }
+/* Vault tools (export / audit / change passwords) */
+.vt-btns { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+#audit-result {
+  margin-top: 10px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 8px 10px;
+  font-size: 12px;
+}
+.audit-line { margin-bottom: 4px; }
+.audit-line:last-child { margin-bottom: 0; }
+.audit-ok   { color: var(--green); }
+.audit-bad  { color: #ff5c5c; }
+.audit-warn { color: #f5a623; }
+#chpw-form {
+  margin-top: 10px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 10px;
+}
+.chpw-note { font-size: 11px; color: var(--text-2); margin-bottom: 8px; }
+.chpw-grid {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 6px 10px;
+  align-items: center;
+}
+.chpw-grid label { font-size: 12px; color: var(--text-2); white-space: nowrap; }
+.chpw-grid input {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  font-size: 13px;
+  padding: 6px 8px;
+  min-width: 0;
+}
+.chpw-actions { margin-top: 10px; text-align: right; }
+#chpw-status { margin-top: 8px; font-size: 12px; color: #f5a623; min-height: 1em; }
+.about-chain {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+  margin: 6px 0 8px;
+}
+.about-chain > span { color: var(--text-3); }
+.about-chip {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  font-size: 11px;
+  font-family: var(--mono);
+  padding: 2px 7px;
+}
+.crypto-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 3px;
+  align-items: baseline;
+}
+.crypto-layer {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  color: var(--text-3);
+  flex-shrink: 0;
+  width: 50px;
+}
+
+.cr-table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 12px; }
+.cr-table td { vertical-align: top; padding: 5px 8px 5px 0; border-top: 1px solid var(--border); }
+.cr-table tr:first-child td { border-top: none; }
+.cr-table .cr-name { font-family: var(--mono); color: var(--text); white-space: nowrap; width: 1%; padding-right: 10px; }
+.cr-table .cr-tag { white-space: nowrap; width: 1%; padding-right: 10px; }
+.cr-table .cr-desc { color: var(--text-2); }
+.cr-aead { color: var(--green); font-size: 10px; font-weight: 700; letter-spacing: .04em; }
+.cr-ctr  { color: var(--text-3); font-size: 10px; font-weight: 700; letter-spacing: .04em; }
+.cr-kdf  { color: #f5a623;       font-size: 10px; font-weight: 700; letter-spacing: .04em; }
+
+/* ─── Runtime self-test (About modal) ───────────────────── */
+#selftest-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border-radius: var(--r);
+  font-size: 12px;
+  font-weight: 600;
+  margin-bottom: 14px;
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--text-2);
+}
+#selftest-banner.ok   { border-color: #3fcf8e44; background: rgba(63,207,142,.08); color: var(--green); }
+#selftest-banner.fail { border-color: #ff5c5c44; background: rgba(255,92,92,.08);  color: var(--danger); }
+.selftest-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 3px 0;
+}
+.selftest-label { font-size: 12px; color: var(--text-2); font-family: var(--mono); }
+.selftest-status {
+  font-size: 12px;
+  font-weight: 700;
+  font-family: var(--mono);
+  flex-shrink: 0;
+  min-width: 20px;
+  text-align: right;
+  color: var(--text-3);
+}
+.selftest-status.ok   { color: var(--green); }
+.selftest-status.fail { color: var(--danger); }
+@keyframes selftest-pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+.selftest-status.loading { animation: selftest-pulse 1s ease-in-out infinite; }
+.btn-retest {
+  font-size: 11px; font-family: var(--mono); padding: 3px 10px;
+  background: transparent; color: var(--text-2);
+  border: 1px solid var(--border); border-radius: 4px;
+  cursor: pointer; transition: color .15s, border-color .15s;
+}
+.btn-retest:hover { color: var(--accent); border-color: var(--accent); }
+
+/* ─── Cipher-failure warning dialog ─────────────────────── */
+#crypto-warn-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,.8);
+  z-index: 3000;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+#crypto-warn-overlay.open { display: flex; }
+#crypto-warn-box {
+  background: var(--surface);
+  border: 2px solid var(--danger);
+  border-radius: 10px;
+  max-width: 500px;
+  width: 100%;
+  box-shadow: 0 12px 48px rgba(255,92,92,.3);
+  overflow: hidden;
+}
+#crypto-warn-head {
+  background: var(--danger);
+  color: #fff;
+  padding: 18px 22px;
+  font-size: 17px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+#crypto-warn-body {
+  padding: 22px;
+  font-size: 14px;
+  color: var(--text-2);
+  line-height: 1.65;
+}
+#crypto-warn-body strong { color: var(--text); }
+#crypto-warn-list {
+  margin: 12px 0 0 18px;
+  padding: 0;
+  color: var(--danger);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.8;
+}
+#crypto-warn-foot {
+  padding: 0 22px 22px;
+  display: flex;
+  justify-content: flex-end;
+}
+#crypto-warn-foot button {
+  background: transparent;
+  color: var(--text-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  padding: 8px 18px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: color .15s, border-color .15s;
+}
+#crypto-warn-foot button:hover { color: var(--text); border-color: var(--text-2); }
+</style>
+</head>
+<body>
+
+<!-- ── Fixed decode panel ──────────────────────────────── -->
+<div id="fixedDiv">
+
+  <div class="p-row">
+    <div style="flex:1;min-width:0">
+      <span class="flbl">Name / URL</span>
+      <span id="decname">&nbsp;</span>
+    </div>
+    <button class="edit-btn" data-action="edit-entry" aria-label="Edit entry" data-tip="Edit entry">&#x270F;&#xFE0E;</button>
+    <button class="del-btn" data-action="delete-entry" aria-label="Delete entry" data-tip="Delete entry">&#x1F5D1;</button>
+  </div>
+
+  <div class="p-row">
+    <div class="field" data-action="copy-username" data-tip="Click to copy username">
+      <span class="flbl">Username</span>
+      <span class="fval" id="decusername">&nbsp;</span>
+    </div>
+    <div class="otp-col" data-action="copy-2fa" data-tip="Click to copy 2FA token">
+      <span class="otp-lbl">Token &nbsp;<span id="updatingIn">--</span>s</span>
+      <div class="otp-display">
+        <span id="otp">------</span>
+        <svg id="otp-ring" width="18" height="18" viewBox="0 0 20 20">
+          <circle cx="10" cy="10" r="8" fill="none" stroke="var(--border)" stroke-width="2.5"/>
+          <circle id="otp-arc" cx="10" cy="10" r="8" fill="none" stroke="var(--green)" stroke-width="2.5"
+                  stroke-linecap="round" stroke-dasharray="50.27" stroke-dashoffset="0"
+                  transform="rotate(-90 10 10)"/>
+        </svg>
+      </div>
+    </div>
+  </div>
+
+  <div class="p-row" data-action="copy-password" style="cursor:pointer" data-tip="Click to copy password">
+    <div class="field">
+      <span class="flbl">Password</span>
+      <span class="fval" id="decpassword">&nbsp;</span>
+    </div>
+  </div>
+
+  <div class="p-row" style="display:none">
+    <div style="flex:1;min-width:0">
+      <span class="flbl">Notes</span>
+      <textarea id="decnotes" rows="1" readonly placeholder="Notes"></textarea>
+    </div>
+  </div>
+
+</div>
+
+<!-- ── Scrollable body ─────────────────────────────────── -->
+<div id="content">
+
+  <!-- Control bar — <form autocomplete="off"> stops Firefox password manager -->
+  <form autocomplete="off" class="ctrl-form"
+        style="display:grid;grid-template-columns:1fr auto auto;gap:6px;align-items:center;margin-bottom:12px;position:relative">
+  <!-- Honeypot: first text field absorbs any extension autofill scan -->
+  <input type="text" aria-hidden="true" tabindex="-1" autocomplete="off"
+         style="position:absolute;width:0;height:0;opacity:0;pointer-events:none"/>
+    <div class="key-wrap">
+      <span class="key-icon">&#x1F511;</span>
+      <input type="password" id="aeskey" placeholder="Primary key" aria-label="Primary key"
+             autocomplete="off" data-lpignore="true" data-1p-ignore spellcheck="false"/>
+      <button class="eye-btn" data-action="toggle-key" aria-label="Show/hide primary key" data-tip="Show / hide">&#x1F441;</button>
+    </div>
+    <button class="btn btn-ghost" data-action="clear-lines" aria-label="Lock and clear" data-tip="Lock and clear all data">&#x2715;</button>
+    <button class="btn btn-accent" data-action="new-entry" data-tip="Add new entry">&#xff0b;&nbsp;New</button>
+    <div class="key-wrap" style="grid-column:1">
+      <span class="key-icon">&#x1F511;</span>
+      <input type="password" id="aeskey2" placeholder="Secondary key" aria-label="Secondary key"
+             autocomplete="off" data-lpignore="true" data-1p-ignore spellcheck="false"/>
+      <button class="eye-btn" data-action="toggle-key2" aria-label="Show/hide secondary key" data-tip="Show / hide">&#x1F441;</button>
+    </div>
+    <div style="grid-column:2/4;display:flex;gap:6px">
+      <button class="btn btn-ghost" data-action="clear-display" aria-label="Clear displayed entry" data-tip="Clear displayed entry">C</button>
+      <button class="btn btn-ghost" id="search-btn" data-action="toggle-search" aria-label="Search entries" data-tip="Search entries">&#x1F50D;</button>
+      <button class="btn btn-ghost" id="about-btn" data-action="open-about" aria-label="About and crypto info" data-tip="About &amp; crypto info">&#x2139;&#xFE0E;</button>
+    </div>
+  </form>
+
+  <!-- Entry count + list -->
+  <div id="entry-count">-- entries</div>
+  <div id="reveal-progress" style="display:none"><div id="reveal-progress-fill"></div></div>
+  <div class="entry-grid">
+<!-- Part 1 -->
+
+<!-- Part 2 -->
+  </div><!-- /entry-grid -->
+
+  <!-- New entry form -->
+  <div id="newentry" class="card" style="display:none">
+    <div class="card-title"><span id="newentry-title">New Entry</span></div>
+
+    <div class="frow">
+      <span class="flabel">Name</span>
+      <input class="finput" type="text" id="name" placeholder="e.g. GitHub" aria-label="Entry name"
+             autocomplete="off" readonly data-clear-readonly/>
+    </div>
+    <div class="frow">
+      <span class="flabel">URL</span>
+      <input class="finput" type="text" id="url" placeholder="https://" aria-label="URL"
+             autocomplete="off" readonly data-clear-readonly/>
+    </div>
+    <div class="frow">
+      <span class="flabel">Username</span>
+      <input class="finput" type="text" id="username" aria-label="Username"
+             autocomplete="off" readonly data-clear-readonly/>
+    </div>
+    <div class="frow pw-frow">
+      <span class="flabel">Password</span>
+      <div class="pw-col">
+        <div class="pw-row">
+          <input class="finput" type="text" id="password" aria-label="Entry password" autocomplete="new-password" autocorrect="off" autocapitalize="none"/>
+          <div id="pw-gen-btns">
+            <button class="btn-sm" data-action="generate" data-tip="Generate a random password">Generate</button>
+            <button class="btn-sm" id="copy-button" data-action="copy-current" disabled data-tip="Copy to clipboard">&#x1F4CB;</button>
+          </div>
+        </div>
+        <div id="pw-strength-wrap" class="pw-strength-wrap" style="display:none">
+          <div class="pw-segs">
+            <div class="pw-seg" id="pw-seg-1"></div>
+            <div class="pw-seg" id="pw-seg-2"></div>
+            <div class="pw-seg" id="pw-seg-3"></div>
+            <div class="pw-seg" id="pw-seg-4"></div>
+          </div>
+          <span class="pw-strength-lbl" id="pw-strength-lbl"></span>
+          <span class="pw-entropy-lbl" id="pw-entropy-lbl"></span>
+        </div>
+      </div>
+    </div>
+    <div class="frow">
+      <span class="flabel">2FA Token</span>
+      <div class="pw-row" style="flex:1;min-width:0">
+        <input class="finput" type="text" id="token" placeholder="Base32 TOTP secret" aria-label="2FA TOTP secret"
+               autocomplete="off" readonly data-clear-readonly/>
+        <button class="btn-sm" id="btn-scan-qr" data-action="scan-qr" data-tip="Scan a TOTP QR code">&#x1F4F7; Scan QR</button>
+      </div>
+    </div>
+    <div class="frow" style="align-items:flex-start">
+      <span class="flabel" style="padding-top:2px">Notes</span>
+      <textarea class="finput fnotes" id="notes" rows="3" placeholder="Optional notes" aria-label="Notes"></textarea>
+    </div>
+
+    <div class="card-footer">
+      <button class="btn btn-ghost" data-action="show-pw-settings" data-tip="Password generator settings">&#x2699;&#xFE0F; Generator</button>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-ghost" data-action="cancel-entry" data-tip="Cancel and discard changes">Cancel</button>
+        <button class="btn btn-accent" data-action="save-entry" data-tip="Encrypt and save entry">Save Entry</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Password generator settings -->
+  <div id="passwordSettings" class="gen-card" style="display:none">
+    <div class="gen-title">Generator Settings</div>
+
+    <div class="gen-grid">
+      <div id="charset"></div>
+      <input type="checkbox" id="custom"/>
+      <label for="custom">Custom chars:</label>
+      <input type="text" id="customchars" value="" placeholder="!@#..."
+             data-check-on-input="custom"/>
+      <input type="radio" name="type" id="by-length"/>
+      <label for="by-length">Length</label>
+      <div class="val-cell">
+        <input type="number" min="1" value="16" step="1" id="length"
+               data-check-on-input="by-length"/>
+        <span>chars</span>
+      </div>
+      <input type="radio" name="type" id="by-entropy" checked/>
+      <label for="by-entropy">Entropy</label>
+      <div class="val-cell">
+        <input type="number" min="0" value="128" step="any" id="entropy"
+               data-check-on-input="by-entropy"/>
+        <span>bits</span>
+      </div>
+    </div>
+
+    <p id="statistics">&nbsp;</p>
+    <p class="ent-note">
+      <span id="crypto-getrandomvalues-entropy"></span>
+      <a href="https://developer.mozilla.org/en-US/docs/Web/API/Crypto/getRandomValues" target="_blank" rel="noopener">
+        <code>crypto.getRandomValues()</code></a>
+    </p>
+  </div>
+
+</div><!-- /content -->
+
+<div id="toast"></div>
+
+<!-- Search overlay -->
+<div id="search-overlay">
+  <div id="search-box">
+    <input type="text" id="search-input" placeholder="Search entries…" aria-label="Search entries" autocomplete="off"/>
+    <div id="search-count"></div>
+    <div id="search-results"></div>
+  </div>
+</div>
+
+<!-- Auto-lock warning -->
+<div id="lock-warning">
+  <span>Locking in <span id="lock-countdown">60</span>s</span>
+  <button id="lock-stay" data-action="cancel-autolock" data-tip="Stay logged in">Stay</button>
+</div>
+
+<!-- Cipher-failure warning dialog (shown on page load if any self-test fails) -->
+<div id="crypto-warn-overlay">
+  <div id="crypto-warn-box">
+    <div id="crypto-warn-head">&#x26A0;&#xFE0E;&nbsp; Cipher Self-Test Failed</div>
+    <div id="crypto-warn-body">
+      <p><strong>One or more cryptographic self-tests failed.</strong> Encryption and decryption may not work correctly in this browser.</p>
+      <p>Do not enter or rely on passwords until this is resolved. Try a different browser (Chrome, Edge, or Safari&nbsp;17.4+).</p>
+      <p style="margin-top:12px">Failed checks:</p>
+      <ul id="crypto-warn-list"></ul>
+    </div>
+    <div id="crypto-warn-foot">
+      <button data-action="close-crypto-warn">Dismiss warning</button>
+    </div>
+  </div>
+</div>
+
+<!-- About modal -->
+<div id="about-overlay">
+  <div id="about-box">
+    <div id="about-header">
+      <h2>&#x2139;&#xFE0E;&nbsp; Password Vault</h2>
+      <button id="about-close" data-action="close-about" aria-label="Close">&times;</button>
+    </div>
+    <div id="about-body">
+
+      <div class="about-section">
+        <h3>Description</h3>
+        <p>Self-hosted, client-side encrypted password manager served by a <strong>PHP-capable web server</strong>. All encryption and decryption happens entirely in your browser using the <strong>WebCrypto API</strong> — the server only stores and serves ciphertext and never sees your plaintext passwords.</p>
+        <p style="margin-top:4px">Open source, released under the <a href="https://opensource.org/license/mit" target="_blank" rel="noopener">MIT License</a>.</p>
+      </div>
+
+      <div class="about-section" id="about-vault-tools">
+        <h3>Vault Tools</h3>
+        <p><strong>Export</strong> downloads the encrypted database exactly as stored on the server (ciphertext only). <strong>Audit</strong> decrypts every entry locally and flags reused, weak, or empty passwords — names only are shown and nothing leaves this device. <strong>Change Passwords</strong> re-encrypts the whole vault under new master passwords in one atomic save.</p>
+        <div class="vt-btns">
+          <button class="btn btn-ghost" data-action="export-vault" data-tip="Download the encrypted database">&#x2B07;&#xFE0E; Export</button>
+          <button class="btn btn-ghost" data-action="audit-vault" data-tip="Find reused / weak passwords (local only)">&#x1F50E;&#xFE0E; Audit</button>
+          <button class="btn btn-ghost" data-action="toggle-chpw" data-tip="Re-encrypt the vault under new passwords">&#x1F511;&#xFE0E; Change Passwords</button>
+        </div>
+        <div id="audit-result" style="display:none"></div>
+        <div id="chpw-form" style="display:none">
+          <p class="chpw-note">Current passwords are taken from the two key fields above. Every entry is decrypted and re-encrypted in your browser, then saved in a single atomic replace — if anything fails, the vault is left untouched.</p>
+          <div class="chpw-grid">
+            <label for="newpw1">New password 1</label>
+            <input type="password" id="newpw1" autocomplete="new-password"/>
+            <label for="newpw1c">Confirm 1</label>
+            <input type="password" id="newpw1c" autocomplete="new-password"/>
+            <label for="newpw2">New password 2</label>
+            <input type="password" id="newpw2" autocomplete="new-password"/>
+            <label for="newpw2c">Confirm 2</label>
+            <input type="password" id="newpw2c" autocomplete="new-password"/>
+          </div>
+          <div class="chpw-actions">
+            <button class="btn btn-accent" id="btn-chpw-go" data-action="do-chpw" data-tip="Decrypt and re-encrypt every entry">Re-encrypt Vault</button>
+          </div>
+          <div id="chpw-status"></div>
+        </div>
+      </div>
+
+      <div class="about-section" id="about-selftest">
+        <h3>Runtime Self-Test</h3>
+        <p style="margin-bottom:10px">Runs automatically on <strong>every page load</strong>. If any check fails a warning dialog is shown immediately. The tests also run each time this panel opens.</p>
+        <div id="selftest-banner">&#x2026; Running tests</div>
+        <div class="selftest-row">
+          <span class="selftest-label">WebCrypto API</span>
+          <span class="selftest-status loading" id="st-webcrypto">&#x2026;</span>
+        </div>
+        <div class="selftest-row">
+          <span class="selftest-label">ChaCha20-Poly1305</span>
+          <span class="selftest-status loading" id="st-chacha">&#x2026;</span>
+        </div>
+        <div class="selftest-row">
+          <span class="selftest-label">AES-256-GCM</span>
+          <span class="selftest-status loading" id="st-aes">&#x2026;</span>
+        </div>
+        <div class="selftest-row">
+          <span class="selftest-label">Twofish-256-CTR</span>
+          <span class="selftest-status loading" id="st-twofish">&#x2026;</span>
+        </div>
+        <div class="selftest-row">
+          <span class="selftest-label">Serpent-256-CTR</span>
+          <span class="selftest-status loading" id="st-serpent">&#x2026;</span>
+        </div>
+        <div class="selftest-row">
+          <span class="selftest-label">Argon2id (WASM)</span>
+          <span class="selftest-status loading" id="st-argon2">&#x2026;</span>
+        </div>
+        <div style="margin-top:10px;text-align:right">
+          <button class="btn-retest" data-action="retest-crypto">&#x21bb; Retest</button>
+        </div>
+      </div>
+
+      <div class="about-section">
+        <h3>Record Formats</h3>
+        <p><strong>Record format (v6)&thinsp;—&thinsp;doubly-encrypted name:</strong></p>
+        <p><code>encName | v6 | recSalt1 | recSalt2 | nameNonce1 | nameNonce2 | iv1 | nonce2 | nonce3 | nonce4 | ciphertext</code></p>
+        <p style="margin-top:4px"><code>recSalt1</code> and <code>recSalt2</code> are the two Argon2id salts (one per master password); every per-cipher key is HKDF-derived from the resulting master keys, so the record carries only nonces, not per-layer salts. The entry name is double-encrypted: <code>AES-256-GCM</code> (password&nbsp;1) as the inner layer, wrapped by <code>ChaCha20-Poly1305</code> (password&nbsp;2) as the outer layer. Both passwords are required to reveal the name. Entry buttons are hidden on page load; they appear automatically when both key fields contain a value and the secondary key field loses focus.</p>
+        <p style="margin-top:4px">Records are stored in a flat file, one per line, sorted alphabetically. The line index is appended at runtime for delete operations.</p>
+      </div>
+
+      <div class="about-section">
+        <h3>Key Derivation</h3>
+        <p>Each record derives <strong>two 256-bit master keys</strong> with memory-hard <code>Argon2id</code> (<strong>m&nbsp;=&nbsp;64&nbsp;MiB, t&nbsp;=&nbsp;3, p&nbsp;=&nbsp;1</strong>) &mdash; one per master password, each over a <strong>32-byte random salt</strong> generated fresh for every save. <code>HKDF-SHA-256</code> then expands each master key into the independent per-cipher subkeys (distinct <code>info</code> labels), so the expensive memory-hard step runs only <strong>twice per record</strong> while every layer still gets its own key.</p>
+        <p style="margin-top:6px">Revealing many entry names at once would otherwise serialise the memory-hard hashes on the main thread (the WASM runs synchronously behind an internal mutex). To keep the UI responsive, each derivation is dispatched to a pool of dedicated <strong>Web Workers</strong> &mdash; one WebAssembly instance each, up to <strong>4 in parallel</strong> &mdash; so peak memory stays bounded at pool&nbsp;&times;&nbsp;64&nbsp;MiB. The pool is created lazily and torn down on every lock, reclaiming its WASM heaps and dropping residual password bytes. If Workers are unavailable, derivation falls back to the main thread.</p>
+      </div>
+
+      <div class="about-section">
+        <h3>Encryption Pipeline</h3>
+        <div class="about-chain">
+          <span class="about-chip">Plaintext&nbsp;JSON</span>
+          <span>&#x2192;</span>
+          <span class="about-chip">ChaCha20-Poly1305</span>
+          <span>&#x2192;</span>
+          <span class="about-chip">AES-256-GCM</span>
+          <span>&#x2192;</span>
+          <span class="about-chip">Twofish-256-CTR</span>
+          <span>&#x2192;</span>
+          <span class="about-chip">Serpent-256-CTR</span>
+          <span>&#x2192;</span>
+          <span class="about-chip">Stored&nbsp;hex</span>
+        </div>
+        <div class="crypto-row">
+          <span class="crypto-layer">Layer 1</span>
+          <span><code>ChaCha20-Poly1305</code> &mdash; AEAD &mdash; password&nbsp;1, 12-byte nonce</span>
+        </div>
+        <div class="crypto-row">
+          <span class="crypto-layer">Layer 2</span>
+          <span><code>AES-256-GCM</code> &mdash; AEAD &mdash; password&nbsp;1, 12-byte IV</span>
+        </div>
+        <div class="crypto-row">
+          <span class="crypto-layer">Layer 3</span>
+          <span><code>Twofish-256-CTR</code> &mdash; password&nbsp;2, 16-byte nonce (unauthenticated; relies on inner AEAD layers for integrity)</span>
+        </div>
+        <div class="crypto-row">
+          <span class="crypto-layer">Layer 4</span>
+          <span><code>Serpent-256-CTR</code> &mdash; password&nbsp;2, 16-byte nonce (unauthenticated; relies on inner AEAD layers for integrity)</span>
+        </div>
+        <p style="margin-top:6px">The two inner AEAD layers authenticate the ciphertext. A wrong password or tampered data causes immediate authentication failure before any plaintext is revealed.</p>
+      </div>
+
+      <div class="about-section">
+        <h3>Two-Password Design</h3>
+        <p>Layers 1 and 2 use <strong>password 1</strong>; layers 3 and 4 use <strong>password 2</strong>. Both passwords are required to decrypt any entry. Either password alone reveals nothing about the stored data.</p>
+        <p style="margin-top:6px">The entry <strong>name</strong> is protected by both passwords as well: the inner <code>AES-256-GCM</code> layer uses password&nbsp;1; the outer <code>ChaCha20-Poly1305</code> layer uses password&nbsp;2. An attacker who compromises one password cannot reveal entry names or payload.</p>
+      </div>
+
+      <div class="about-section">
+        <h3>Cipher Rationale</h3>
+        <p>The four layers span <strong>three independent cipher families</strong> from different design lineages. An attacker breaking the stored ciphertext must defeat all four simultaneously &mdash; breaking AES does not weaken ChaCha20, Twofish, or Serpent. Each cipher was chosen to complement the others' failure modes.</p>
+        <table class="cr-table">
+          <tr>
+            <td class="cr-name"><code>ChaCha20-Poly1305</code></td>
+            <td class="cr-tag"><span class="cr-aead">AEAD</span></td>
+            <td class="cr-desc">Stream cipher designed by Daniel J. Bernstein. No S-box lookups &mdash; constant-time by construction, immune to cache-timing attacks. Adopted in TLS&nbsp;1.3, SSH, and WireGuard as the standard software-path cipher. The Poly1305 tag authenticates the ciphertext; a wrong password or tampered byte causes immediate rejection before any plaintext is produced.</td>
+          </tr>
+          <tr>
+            <td class="cr-name"><code>AES-256-GCM</code></td>
+            <td class="cr-tag"><span class="cr-aead">AEAD</span></td>
+            <td class="cr-desc">The global standard block cipher, NIST-standardised and FIPS&nbsp;140-2 compliant. Hardware-accelerated (AES-NI) on all modern CPUs. The most widely analysed cipher in existence. GCM adds a Galois-field authentication tag, giving full authenticated encryption. Used here as the second AEAD layer so two independent authentication checks must both pass.</td>
+          </tr>
+          <tr>
+            <td class="cr-name"><code>Twofish-256-CTR</code></td>
+            <td class="cr-tag"><span class="cr-ctr">CTR</span></td>
+            <td class="cr-desc">AES finalist (top 5), designed by Bruce Schneier, John Kelsey, Doug Whiting, David Wagner, Chris Hall, and Niels Ferguson. Key-dependent S-boxes and a Feistel structure entirely different from AES&rsquo;s SubBytes/ShiftRows/MixColumns design. Adds a third independent key under password&nbsp;2, so an attacker who knows password&nbsp;1 still cannot read the plaintext.</td>
+          </tr>
+          <tr>
+            <td class="cr-name"><code>Serpent-256-CTR</code></td>
+            <td class="cr-tag"><span class="cr-ctr">CTR</span></td>
+            <td class="cr-desc">AES finalist that came <strong>second</strong> in the panel vote, designed by Ross Anderson, Eli Biham, and Lars Knudsen. Chosen by the designers specifically for its conservative security margin: 32 rounds (vs AES&rsquo;s 14), with a simple bitslice structure that has resisted cryptanalysis for over 25 years. The outermost layer &mdash; any weakness in layers 1&ndash;3 is still protected here.</td>
+          </tr>
+        </table>
+        <p style="margin-top:10px"><strong>Argon2id &mdash; making brute-force infeasible.</strong> Before any cipher sees a key, each password is passed through Argon2id (PHC winner, 2015) with <strong>64&nbsp;MiB of RAM and 3 passes</strong>. This means every single password guess an attacker makes requires 64&nbsp;MiB of memory and significant CPU time. A GPU farm that can test billions of bcrypt hashes per second is reduced to a few thousand Argon2id guesses per second per card. Combined with a strong, unique second password, this raises the cost of an offline brute-force attack to be computationally prohibitive.</p>
+        <p style="margin-top:6px">The overall result: even if an attacker obtains the raw ciphertext file, they face four independent cipher layers with independent HKDF-derived keys, two independent AEAD authentication checks, and a memory-hard KDF that serialises every guess into a 64&nbsp;MiB, multi-pass operation &mdash; all of which must be overcome before a single password is revealed.</p>
+      </div>
+
+      <div class="about-section">
+        <h3>TOTP (2FA)</h3>
+        <p><code>HMAC-SHA-1</code> &mdash; RFC&nbsp;6238 &mdash; 30-second window &mdash; 6-digit codes.</p>
+        <p>Secrets are stored as Base32 in the <code>token</code> field, encrypted with the rest of the entry fields.</p>
+        <p style="margin-top:4px">The <strong>📷 Scan QR</strong> button in the new-entry form uses the browser's <code>BarcodeDetector</code> API to read a TOTP QR code from a photo or image file. The <code>secret=</code> parameter is extracted from the <code>otpauth://</code> URI; the issuer and account name are used to pre-fill the Name and Username fields if they are empty. Requires Chrome&nbsp;83+, Edge&nbsp;83+, or Safari&nbsp;17.4+.</p>
+      </div>
+
+      <div class="about-section">
+        <h3>Password Strength</h3>
+        <p>While typing a password in the new-entry form, a four-segment bar and label estimate strength from the character classes present (lowercase, uppercase, digits, symbols) and the password length. Entropy is reported in bits.</p>
+        <table style="width:100%;margin-top:6px;border-collapse:collapse;font-size:12px">
+          <tr><td style="color:#ff5c5c;font-family:var(--mono);padding:1px 8px 1px 0">Weak</td><td style="color:var(--text-2)">&lt; 40 bits</td></tr>
+          <tr><td style="color:#f5a623;font-family:var(--mono);padding:1px 8px 1px 0">Fair</td><td style="color:var(--text-2)">40 – 79 bits</td></tr>
+          <tr><td style="color:#3fcf8e;font-family:var(--mono);padding:1px 8px 1px 0">Strong</td><td style="color:var(--text-2)">80 – 119 bits</td></tr>
+          <tr><td style="color:#4d8eff;font-family:var(--mono);padding:1px 8px 1px 0">Very Strong</td><td style="color:var(--text-2)">&ge; 120 bits</td></tr>
+        </table>
+      </div>
+
+      <div class="about-section">
+        <h3>Key Caching</h3>
+        <p>Argon2id master keys are memoised per <code>(password,&nbsp;salt)</code> pair for the duration of the session, so each entry incurs only its two memory-hard derivations once. Clicking an entry after reveal-all reuses the cached master keys (no further Argon2id work). The cache is wiped on auto-lock or manual clear.</p>
+      </div>
+
+      <div class="about-section">
+        <h3>Auto-lock</h3>
+        <p>After <strong>5 minutes</strong> of inactivity a 60-second warning appears. If not dismissed, all key fields and cached keys are cleared from memory.</p>
+      </div>
+
+      <div class="about-section">
+        <h3>Libraries &amp; Attribution</h3>
+        <p>Cipher primitives are third-party open-source, bundled <strong>inline</strong> &mdash; no runtime network requests; Argon2id WASM is embedded as base64. Each is used under its license, upstream notices retained.</p>
+        <table class="lib-table">
+          <tr>
+            <td class="lt-pkg"><code>@noble/ciphers</code></td>
+            <td class="lt-use">MIT<br><span class="lt-ver">Paul Miller</span></td>
+            <td class="lt-info">ChaCha20-Poly1305<br><a href="https://github.com/paulmillr/noble-ciphers" target="_blank" rel="noopener">github.com/paulmillr/noble-ciphers</a></td>
+          </tr>
+          <tr>
+            <td class="lt-pkg"><code>twofish-ts</code><br><span class="lt-ver">v1.0.2</span></td>
+            <td class="lt-use">MIT<br><span class="lt-ver">Logan R. Kearsley</span></td>
+            <td class="lt-info">Twofish-256<br><a href="https://github.com/gliese1337/twofish" target="_blank" rel="noopener">github.com/gliese1337/twofish</a></td>
+          </tr>
+          <tr>
+            <td class="lt-pkg"><code>hash-wasm</code><br><span class="lt-ver">v4.12.0</span></td>
+            <td class="lt-use">MIT<br><span class="lt-ver">Dani Bir&oacute;</span></td>
+            <td class="lt-info">Argon2id (WebAssembly)<br><a href="https://github.com/Daninet/hash-wasm" target="_blank" rel="noopener">github.com/Daninet/hash-wasm</a></td>
+          </tr>
+          <tr>
+            <td class="lt-pkg"><code>Serpent-256</code></td>
+            <td class="lt-use">Public domain</td>
+            <td class="lt-info">In-tree bitslice cipher (CTR), not from npm. Verified against <a href="https://www.bouncycastle.org/" target="_blank" rel="noopener">Bouncy Castle</a> 256-bit vectors; algorithm by <a href="https://www.cl.cam.ac.uk/~rja14/serpent.html" target="_blank" rel="noopener">Anderson, Biham &amp; Knudsen</a>.</td>
+          </tr>
+          <tr>
+            <td class="lt-pkg"><code>esbuild</code></td>
+            <td class="lt-use">MIT<br><span class="lt-ver">Evan Wallace</span></td>
+            <td class="lt-info">Build tooling only &mdash; not shipped to the browser.<br><a href="https://github.com/evanw/esbuild" target="_blank" rel="noopener">github.com/evanw/esbuild</a></td>
+          </tr>
+        </table>
+      </div>
+
+      <div class="about-section">
+        <h3>Standards Alignment</h3>
+        <div class="standards-grid">
+          <span class="sg-name">Argon2 (RFC 9106)</span>
+          <span class="sg-met">Met</span>
+          <span class="sg-desc">Argon2id key derivation &mdash; m&nbsp;=&nbsp;64&nbsp;MiB, t&nbsp;=&nbsp;3, p&nbsp;=&nbsp;1 (exceeds the RFC&nbsp;9106 second-recommended option), then HKDF-SHA-256 subkeys</span>
+
+          <span class="sg-name">RFC 6238</span>
+          <span class="sg-met">Met</span>
+          <span class="sg-desc">TOTP &mdash; 30-second window, 6-digit codes</span>
+
+          <span class="sg-name">OWASP ASVS L1/L2</span>
+          <span class="sg-met">Met</span>
+          <span class="sg-desc">Client-side crypto, CSRF protection, Basic-Auth rate limiting, full header suite (CSP, HSTS, COOP/CORP, Permissions-Policy)</span>
+
+          <span class="sg-name">OWASP ASVS L3</span>
+          <span class="sg-partial">Partial</span>
+          <span class="sg-desc"><code>style-src 'unsafe-inline'</code> still required by inline <code>style</code> attributes; <code>script-src</code> is <code>'self' 'wasm-unsafe-eval'</code> (the latter only to compile the Argon2id WASM). Key derivation is memory-hard Argon2id</span>
+
+          <span class="sg-name">FIPS 140</span>
+          <span class="sg-partial">Partial</span>
+          <span class="sg-desc">AES-256-GCM and HKDF-SHA-256 are approved; ChaCha20, Twofish, Serpent and Argon2id are not</span>
+        </div>
+      </div>
+
+      <div class="about-section">
+        <h3>Hello There</h3>
+        <p>You read this far and made it all the way to the end?<br />As a reward: stand up, take a 5 minute break and go stretch.</p>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+</body>
+</html>

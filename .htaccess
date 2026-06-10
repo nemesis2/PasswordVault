@@ -1,0 +1,47 @@
+# Block direct access to data files and HTML templates.
+# index.html and javascript.js must remain publicly readable.
+<FilesMatch "^(lines|part1|part2)$">
+    Require all denied
+</FilesMatch>
+
+# Apache 2.2 fallback
+<IfModule !mod_authz_core.c>
+    <Files ~ "^(lines|part1|part2)$">
+        Order allow,deny
+        Deny from all
+    </Files>
+</IfModule>
+
+# Security headers (defense-in-depth). Apache-only — ignored under nginx.
+# Wrapped in <IfModule> so the site does not 500 if mod_headers is not loaded;
+# the headers simply won't apply.
+<IfModule mod_headers.c>
+    # script-src is 'self' with NO 'unsafe-inline': the HTML carries no inline
+    # on*= handlers and no inline <script>, so injected script will not execute
+    # under this policy (handlers are bound in javascript.js via data-action
+    # delegation + addEventListener). 'wasm-unsafe-eval' is required ONLY so the
+    # inlined Argon2id WebAssembly module can compile (all WASM compilation is
+    # blocked without it, even same-origin/embedded); it does NOT re-enable
+    # JS eval()/inline scripts. worker-src 'self' permits the same-origin
+    # argon2-worker.js (the Argon2id Web Worker pool); that worker compiles WASM
+    # too, and inherits this same CSP header from its own HTTP response, so
+    # 'wasm-unsafe-eval' covers it as well. style-src keeps 'unsafe-inline'
+    # because the templates still use inline style="" attributes (style injection
+    # is far lower risk and connect-src 'self' already blocks CSS-based
+    # exfiltration). connect-src / img-src / form-action 'self' stop a compromised
+    # page from sending decrypted secrets to an external origin; frame-ancestors
+    # 'none' blocks clickjacking.
+    Header always set Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+    Header always set X-Content-Type-Options "nosniff"
+    Header always set Referrer-Policy "no-referrer"
+    # HSTS: force HTTPS for this host (only meaningful when served over TLS). Add
+    # 'includeSubDomains; preload' once every subdomain is confirmed HTTPS-only.
+    Header always set Strict-Transport-Security "max-age=63072000"
+    # Disable APIs the vault never uses (camera stays on for QR scanning).
+    Header always set Permissions-Policy "camera=(self), geolocation=(), microphone=(), payment=(), usb=()"
+    # Cross-origin isolation: detach this browsing context from openers/embedders.
+    Header always set Cross-Origin-Opener-Policy "same-origin"
+    Header always set Cross-Origin-Resource-Policy "same-origin"
+    # Vault HTML embeds the ciphertext DB — keep it out of on-disk caches.
+    Header always set Cache-Control "no-store"
+</IfModule>
