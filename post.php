@@ -197,6 +197,25 @@ function is_valid_record($s) {
     return false;
 }
 
+// ---- Manifest validation ----
+// The integrity manifest is computed and verified entirely client-side (it is
+// an HMAC keyed off the master passwords, which the server never has); here it
+// is only shape-checked and stored opaquely.
+//
+// vm1:  vm1 | salt1HEX(64) | salt2HEX(64) | revision | timestamp | hmacHEX(64)
+function is_valid_manifest($s) {
+    if (!is_string($s) || strlen($s) > 512) return false;
+    $p = explode('|', $s);
+    if (count($p) !== 6 || $p[0] !== 'vm1') return false;
+    foreach (array(1, 2, 5) as $i) {
+        if (strlen($p[$i]) !== 64 || !ctype_xdigit($p[$i])) return false;
+    }
+    foreach (array(3, 4) as $i) {
+        if ($p[$i] === '' || strlen($p[$i]) > 15 || !ctype_digit($p[$i])) return false;
+    }
+    return true;
+}
+
 // ---- Input validation ----
 // Skipped entirely in regen mode (no record is read from the request).
 $data       = null;
@@ -205,9 +224,24 @@ $delete_rec = null;   // delete-by-content: the full record string to remove
 $bulk       = false;  // whole-vault replace (master-password change)
 $bulk_lines = null;
 $expect_hash = '';
+$sign        = false; // store a new integrity manifest (no record change)
+$manifest_in = null;
 if (!$regen) {
     $bulk = isset($_POST['bulk']);
-    if ($bulk) {
+    $sign = isset($_POST['sign']);
+    if ($sign) {
+        // Sign is exclusive — it changes no record, only the manifest file.
+        if ($bulk || isset($_POST['data']) || isset($_POST['delete']) || isset($_POST['delete_rec'])) {
+            http_response_code(400);
+            exit('Invalid data');
+        }
+        $manifest_in = isset($_POST['manifest'])    ? $_POST['manifest']    : '';
+        $expect_hash = isset($_POST['expect_hash']) ? $_POST['expect_hash'] : '';
+        if (!preg_match('/^[0-9a-f]{64}$/', $expect_hash) || !is_valid_manifest($manifest_in)) {
+            http_response_code(400);
+            exit('Invalid data');
+        }
+    } elseif ($bulk) {
         // Bulk replace is exclusive — no per-record params may ride along.
         if (isset($_POST['data']) || isset($_POST['delete']) || isset($_POST['delete_rec'])) {
             http_response_code(400);
@@ -297,7 +331,15 @@ function respond_stale($linesfp) {
 
 // ---- Staleness checks (inside the lock, before any backup or mutation) ----
 if (!$regen) {
-    if ($bulk) {
+    if ($sign) {
+        // The manifest signs a specific record set: the client sends the hash
+        // of the set it signed, and we refuse to store a manifest for any other
+        // state (another client wrote in between → the client must re-sign).
+        $have_hash = hash('sha256', implode("\n", $array));
+        if (!hash_equals($have_hash, $expect_hash)) {
+            respond_stale($linesfp);
+        }
+    } elseif ($bulk) {
         // The client hashes the record list it re-encrypted (records joined
         // with "\n", no trailing newline). A mismatch means `lines` changed
         // under it, so its re-encryption is incomplete — refuse the replace.
@@ -331,7 +373,7 @@ function prune_backups($keep) {
 // Back up the locked snapshot; abort if it cannot be written so we never modify
 // the only copy. Skip when there is nothing to back up (empty/new file), and in
 // regen mode, which never modifies `lines`.
-if (!$regen && $current !== '') {
+if (!$regen && !$sign && $current !== '') {
     if (!is_dir('bak')) { @mkdir('bak', 0700); }
     // Microsecond suffix keeps two writes in the same second from sharing a
     // backup filename; fixed width preserves the lexical-sort order above.
@@ -349,9 +391,19 @@ if (!$regen && $current !== '') {
 }
 
 // ---- Update the database (lines file) ----
-if ($regen) {
-    // Regen: just normalise the order for the rebuild below; `lines` untouched.
+if ($regen || $sign) {
+    // Regen/sign: just normalise the order for the rebuild below; `lines` untouched.
     sort($array, SORT_STRING);
+    if ($sign) {
+        // Store the new manifest (shape-validated, hash-matched above). Written
+        // under the same `lines` flock every other writer holds, so a sign can
+        // never interleave with a record write.
+        if (@file_put_contents('manifest', $manifest_in . "\n") === false) {
+            http_response_code(500);
+            exit('Write failed');
+        }
+        @chmod('manifest', 0600);
+    }
 } else {
     if ($bulk) {
         // Whole-vault replace: count + hash already verified above, every
@@ -373,6 +425,18 @@ if ($regen) {
         exit('Write failed');
     }
     fflush($linesfp);
+}
+
+// ---- Current manifest (for the index.html embed and the JSON response) ----
+// In sign mode it is the one just stored; otherwise read the manifest file,
+// tolerating absence (unsigned vault) and ignoring anything malformed.
+$manifest_out = $sign ? $manifest_in : null;
+if ($manifest_out === null) {
+    $m = @file_get_contents('manifest');
+    if (is_string($m)) {
+        $m = trim($m);
+        if (is_valid_manifest($m)) $manifest_out = $m;
+    }
 }
 
 // ---- Rebuild index.html from templates + entries ----
@@ -403,6 +467,11 @@ for ($x = 0; $x < $asize; $x++) {
     }
 }
 
+// Embed the integrity manifest so the client can verify on unlock without an
+// extra request. Hidden carrier element only — the JS reads data-manifest.
+$mv = htmlspecialchars($manifest_out === null ? '' : $manifest_out, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+$array1[] = "<span id=\"vault-manifest\" hidden data-manifest=\"$mv\"></span>\n";
+
 $array2 = file('part2');
 if ($array2 === false) {
     http_response_code(500);
@@ -425,7 +494,8 @@ foreach ($array as $i => $line) {
         $entries[] = $row . '|' . $i;
     }
 }
-echo json_encode(['ok' => true, 'regen' => $regen, 'entries' => $entries]);
+echo json_encode(['ok' => true, 'regen' => $regen, 'sign' => $sign,
+                  'manifest' => $manifest_out, 'entries' => $entries]);
 
 // Release the exclusive lock held since the start of the critical section.
 // (PHP would also release it on script end, but free it explicitly.)

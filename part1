@@ -225,6 +225,8 @@ body {
   padding: 8px 0;
 }
 #aeskey::placeholder, #aeskey2::placeholder { color: var(--text-3); font-family: inherit; font-size: 13px; }
+#aeskey:disabled, #aeskey2:disabled { color: var(--text-3); cursor: default; }
+.key-wrap:has(input:disabled) { opacity: .45; border-color: var(--border); }
 
 .eye-btn {
   background: none;
@@ -262,6 +264,7 @@ body {
   color: #fff;
 }
 .btn-accent:hover { background: var(--accent-h); }
+.btn-accent:disabled { opacity: .4; cursor: default; }
 
 /* ─── Reveal progress bar ─────────────────────────────────── */
 #reveal-progress {
@@ -299,11 +302,17 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  transition: background .15s, border-color .15s, color .15s;
+  transition: color .15s;
 }
 .entry-btn:hover {
   background: var(--elevated);
   border-color: var(--border-2);
+}
+.entry-btn.selected {
+  background: var(--elevated);
+  border-color: var(--accent);
+  color: var(--accent);
+  transition: none;
 }
 
 /* ─── New entry card ──────────────────────────────────────── */
@@ -364,6 +373,10 @@ body {
 .pw-seg { width: 36px; height: 4px; border-radius: 2px; background: var(--border); transition: background .25s; }
 .pw-strength-lbl { font-size: 11px; font-weight: 600; font-family: var(--mono); transition: color .25s; }
 .pw-entropy-lbl { font-size: 11px; color: var(--text-3); font-family: var(--mono); margin-left: auto; }
+#vault-key-bar { margin-top: -8px; height: 12px; display: flex; align-items: center; gap: 8px; pointer-events: none; opacity: 0; transition: opacity .25s; }
+#vault-key-segs { flex: 1; display: flex; gap: 2px; align-items: center; }
+.vkb-seg { flex: 1; height: 3px; border-radius: 1.5px; background: var(--border); transition: background .3s; }
+#vault-key-lbl { font-size: 10px; font-weight: 600; font-family: var(--mono); white-space: nowrap; flex-shrink: 0; line-height: 1; transition: color .25s; }
 
 .btn-sm {
   background: var(--elevated);
@@ -499,16 +512,8 @@ body {
     0%   { box-shadow: 0 0 0 3px rgba(77,142,255,.5), 0 0 12px rgba(77,142,255,.25); }
     100% { box-shadow: 0 0 0 0   rgba(77,142,255,0);                                  }
 }
-@keyframes entry-blink {
-    0%   { background: var(--elevated); border-color: var(--accent);
-           color: var(--accent-h);
-           box-shadow: 0 0 0 3px rgba(77,142,255,.35), 0 0 10px rgba(77,142,255,.2); }
-    100% { background: var(--card);    border-color: var(--border);
-           color: var(--text);
-           box-shadow: none; }
-}
 .btn-flash            { animation: btn-blink   500ms ease-out forwards; }
-.entry-btn.btn-flash  { animation: entry-blink 500ms ease-out forwards; }
+.entry-btn.btn-flash  { animation: none; }
 
 /* ─── TOTP ring ───────────────────────────────────────────── */
 .otp-display { display: flex; align-items: center; gap: 6px; }
@@ -521,13 +526,32 @@ body {
 }
 .copy-flash { animation: field-flash 600ms ease-out forwards; }
 
-/* ─── Entry count ─────────────────────────────────────────── */
+/* ─── Entry count + integrity badge (same line) ──────────── */
+#entry-count-row {
+  display: flex;
+  align-items: baseline;
+  margin-bottom: 6px;
+}
+#vault-integrity {
+  font-size: 11px;
+  flex: 1;
+}
 #entry-count {
   font-size: 11px;
   color: var(--text-2);
-  text-align: right;
-  margin-bottom: 6px;
+  white-space: nowrap;
 }
+#integrity-status {
+  margin-top: 10px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 8px 10px;
+  font-size: 12px;
+}
+#vault-integrity.vi-ok,   #integrity-status.vi-ok   { color: var(--green); }
+#vault-integrity.vi-warn, #integrity-status.vi-warn { color: #f5a623; }
+#vault-integrity.vi-fail, #integrity-status.vi-fail { color: var(--danger); font-weight: 700; }
 
 /* ─── Search overlay ──────────────────────────────────────── */
 #search-overlay {
@@ -659,6 +683,8 @@ body {
 .del-btn[data-tip]::after,
 .edit-btn[data-tip]::after,
 #about-btn[data-tip]::after { left: auto; right: 0; transform: none; }
+[data-action="export-vault"][data-tip]::after { left: 0; transform: none; }
+[data-action="resign-vault"][data-tip]::after { left: auto; right: 0; transform: none; }
 
 /* ─── About modal ──────────────────────────────────────────── */
 #about-overlay {
@@ -775,7 +801,8 @@ body {
 .about-section a { color: var(--accent); text-decoration: none; }
 .about-section a:hover { color: var(--accent-h); text-decoration: underline; }
 /* Vault tools (export / audit / change passwords) */
-.vt-btns { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+.vt-btns { display: flex; gap: 6px; flex-wrap: nowrap; margin-top: 8px; }
+.vt-btns .btn { font-size: 12px; padding: 6px 10px; }
 #audit-result {
   margin-top: 10px;
   background: var(--card);
@@ -1045,9 +1072,21 @@ body {
       <button class="btn btn-ghost" id="about-btn" data-action="open-about" aria-label="About and crypto info" data-tip="About &amp; crypto info">&#x2139;&#xFE0E;</button>
     </div>
   </form>
+  <div id="vault-key-bar">
+    <div id="vault-key-segs">
+      <div class="vkb-seg" id="vkb-1"></div>
+      <div class="vkb-seg" id="vkb-2"></div>
+      <div class="vkb-seg" id="vkb-3"></div>
+      <div class="vkb-seg" id="vkb-4"></div>
+    </div>
+    <span id="vault-key-lbl"></span>
+  </div>
 
-  <!-- Entry count + list -->
-  <div id="entry-count">-- entries</div>
+  <!-- Entry count + integrity badge (same row) -->
+  <div id="entry-count-row">
+    <div id="vault-integrity" style="display:none"></div>
+    <div id="entry-count">-- entries</div>
+  </div>
   <div id="reveal-progress" style="display:none"><div id="reveal-progress-fill"></div></div>
   <div class="entry-grid">
 <!-- Part 1 -->

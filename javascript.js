@@ -2274,6 +2274,14 @@ function resizeFreezePane() {
     document.getElementById('content').style.marginTop = h + 'px';
 }
 
+var _selectedBtn = null;
+
+function _selectBtn(btn) {
+    if (_selectedBtn && _selectedBtn !== btn) _selectedBtn.classList.remove('selected');
+    _selectedBtn = btn || null;
+    if (_selectedBtn) _selectedBtn.classList.add('selected');
+}
+
 function blinkTD(td) {
     clearTimeout(blinkTimer);
     if (blinkObject) blinkObject.classList.remove('btn-flash');
@@ -2347,15 +2355,18 @@ function _setupMaskedInput(el) {
             e.preventDefault();
             if (s !== en) { _real = _real.slice(0, s) + _real.slice(en); _setDom(_real); el.setSelectionRange(s, s); }
             else if (s > 0) { _real = _real.slice(0, s - 1) + _real.slice(s); _setDom(_real); el.setSelectionRange(s - 1, s - 1); }
+            _updateVaultKeyBar();
         } else if (e.key === 'Delete') {
             e.preventDefault();
             if (s !== en) { _real = _real.slice(0, s) + _real.slice(en); _setDom(_real); el.setSelectionRange(s, s); }
             else if (s < _real.length) { _real = _real.slice(0, s) + _real.slice(s + 1); _setDom(_real); el.setSelectionRange(s, s); }
+            _updateVaultKeyBar();
         } else if (e.key.length === 1) {
             e.preventDefault();
             _real = _real.slice(0, s) + e.key + _real.slice(en);
             _setDom(_real);
             el.setSelectionRange(s + 1, s + 1);
+            _updateVaultKeyBar();
         }
     });
 
@@ -2367,6 +2378,7 @@ function _setupMaskedInput(el) {
         _real = _real.slice(0, s) + text + _real.slice(en);
         _setDom(_real);
         el.setSelectionRange(s + text.length, s + text.length);
+        _updateVaultKeyBar();
     });
 
     el.addEventListener('cut', function(e) {
@@ -2378,6 +2390,7 @@ function _setupMaskedInput(el) {
             _real = _real.slice(0, s) + _real.slice(en);
             _setDom(_real);
             el.setSelectionRange(s, s);
+            _updateVaultKeyBar();
         }
     });
 
@@ -2387,6 +2400,7 @@ function _setupMaskedInput(el) {
     // circles which must not overwrite _real.
     el.addEventListener('input', function() {
         if (_show || _focused) _real = _proto.get.call(el);
+        _updateVaultKeyBar();
     });
 }
 
@@ -2426,6 +2440,7 @@ function clearDisplay() {
     deleteEntryName   = null;
     deleteEntryRecord = null;
     _decodedFields    = null;
+    _selectBtn(null);
     document.getElementById('decname').textContent     = ' ';
     document.getElementById('decusername').textContent = ' ';
     document.getElementById('decpassword').textContent = ' ';
@@ -2435,6 +2450,7 @@ function clearDisplay() {
 function _resetKeyFields() {
     document.getElementById('aeskey').value  = '';
     document.getElementById('aeskey2').value = '';
+    _updateVaultKeyBar();
 }
 
 function clearLines(td) {
@@ -2502,6 +2518,7 @@ function newEntry(td) {
     document.getElementById('newentry-title').textContent = 'New Entry';
     const el = document.getElementById('newentry');
     el.style.display = 'block';
+    updatePWStrength();
     _syncScanBtnWidth();
     const fixedH = document.getElementById('fixedDiv').offsetHeight;
     const y = el.getBoundingClientRect().top + window.scrollY - fixedH - 8;
@@ -2591,7 +2608,7 @@ function _rebuildEntryGrid(entries) {
         var btn = document.createElement('button');
         btn.className   = 'entry-btn';
         btn.dataset.row = row;
-        btn.onclick = function() { decodeLine(btn, row); };
+        btn.onclick = function() { if (btn === _selectedBtn) { clearDisplay(); } else { decodeLine(btn, row); } };
         if (parts[1] === 'v6') {
             var rowKey = parts.slice(0, -1).join('|');
             var cached = _v5Names.get(rowKey);
@@ -2630,7 +2647,7 @@ function _initEntries() {
             // 'unsafe-inline' script); wire the click here from data-row, the
             // same way _rebuildEntryGrid does for dynamically-added buttons.
             var row = btn.dataset.row;
-            btn.onclick = function() { decodeLine(btn, row); };
+            btn.onclick = function() { if (btn === _selectedBtn) { clearDisplay(); } else { decodeLine(btn, row); } };
         }
     });
     updateEntryCount();
@@ -2639,6 +2656,9 @@ function _initEntries() {
 function _applyServerResponse(text) {
     var resp = JSON.parse(text);
     if (resp.ok && Array.isArray(resp.entries)) {
+        // Track the server's current integrity manifest (may be null on an
+        // unsigned vault); the post-write sign builds its revision from this.
+        if ('manifest' in resp) _manifest = resp.manifest;
         _rebuildEntryGrid(resp.entries);
         return true;
     }
@@ -2654,6 +2674,7 @@ async function decodeLine(passedTD, encryptedData) {
     blinkTD(passedTD);
     clearDisplay();
 
+    _selectBtn(passedTD);
     var parts   = encryptedData.split('|');
     var version = parts[1];
 
@@ -2754,6 +2775,7 @@ function _relockV5Entries() {
     _lastRevealPw2 = null;
     _v5Names.clear();
     _clearVaultTools();
+    _setIntegrityBadge(null);
     document.querySelectorAll('.entry-grid .entry-btn').forEach(function(btn) {
         if (btn.dataset.row && btn.dataset.row.split('|')[1] === 'v6') {
             btn.classList.add('v5-locked');
@@ -2763,6 +2785,7 @@ function _relockV5Entries() {
         }
     });
     updateEntryCount();
+    _updateVaultKeyBar();
 }
 
 // Show any v5 buttons whose names are already in _v5Names (after save/edit).
@@ -2815,9 +2838,10 @@ async function _revealAllV5Names(pw, pw2) {
     var fill = document.getElementById('reveal-progress-fill');
     if (bar)  { fill.style.width = '0%'; bar.style.display = ''; }
 
-    var done    = 0;
-    var nextIdx = 0;
-    var aborted = false;
+    var done       = 0;
+    var nextIdx    = 0;
+    var aborted    = false;
+    var revealedOk = 0;   // names actually decrypted/shown — 0 means wrong keys
 
     // Reveal one button: reuse a cached name or derive it. Returns false if the
     // run has been superseded (keys changed mid-flight) so the worker stops.
@@ -2828,6 +2852,7 @@ async function _revealAllV5Names(pw, pw2) {
             var n = _v5Names.get(rowKey);
             btn.textContent = n; btn.title = n;
             btn.classList.remove('v5-locked'); btn.style.display = '';
+            revealedOk++;
         } else {
             try {
                 var name = await decryptName(pw, pw2, parts[2], parts[3], parts[4], parts[5], parts[0]);
@@ -2835,6 +2860,7 @@ async function _revealAllV5Names(pw, pw2) {
                 _v5Names.set(rowKey, name);
                 btn.textContent = name; btn.title = name;
                 btn.classList.remove('v5-locked'); btn.style.display = '';
+                revealedOk++;
             } catch (_) {
                 // A superseded run can throw because the keys no longer match the
                 // in-progress edit; bail instead of marking entries as failed.
@@ -2844,6 +2870,7 @@ async function _revealAllV5Names(pw, pw2) {
         }
         done++;
         if (fill) fill.style.width = Math.round((done / total) * 100) + '%';
+        updateEntryCount();
         return true;
     }
 
@@ -2870,6 +2897,10 @@ async function _revealAllV5Names(pw, pw2) {
     // blur can skip the whole pass.
     _lastRevealPw  = pw;
     _lastRevealPw2 = pw2;
+    // Keys are confirmed good (at least one name decrypted) — check the vault
+    // signature against what this page is showing. Wrong-password runs reveal
+    // nothing and must not raise a false integrity alarm.
+    if (revealedOk > 0) _verifyManifest(pw, pw2);
 }
 
 // ============================================================
@@ -2922,6 +2953,7 @@ async function saveEntry() {
         try {
             if (_applyServerResponse(responseText)) _revealCachedV5Buttons();
         } catch (_) { location.reload(); return; }
+        _signAfterWrite();
         clearDisplay();
         document.getElementById('name').value     = '';
         document.getElementById('url').value      = '';
@@ -3140,6 +3172,10 @@ async function changeMasterPasswords() {
         clearDisplay();
         try { _applyServerResponse(responseText); } catch (_) { location.reload(); return; }
         _revealCachedV5Buttons();
+        // Re-sign under the NEW passwords (the key fields were just switched).
+        // The old manifest's salts are reused — Argon2id(new pw, old salt) is a
+        // fresh independent key, and the revision chain stays unbroken.
+        _signAfterWrite();
         ['newpw1', 'newpw1c', 'newpw2', 'newpw2c'].forEach(function(id) {
             document.getElementById(id).value = '';
         });
@@ -3170,6 +3206,227 @@ function _clearVaultTools() {
     if (f) f.style.display = 'none';
     var status = document.getElementById('chpw-status');
     if (status) status.textContent = '';
+}
+
+// ============================================================
+// Vault integrity manifest (vm1)
+//
+// A keyed signature over the whole record set, stored server-side as the
+// `manifest` file and embedded in index.html (#vault-manifest):
+//
+//   vm1|salt1HEX|salt2HEX|revision|timestamp|hmacHEX
+//
+// hmac = HMAC-SHA-256(vaultKey, "vm1|salt1|salt2|revision|timestamp"
+//                              + "\n" + sortedRecords.join("\n"))
+// vaultKey = HKDF(Argon2id(pw1,salt1) || Argon2id(pw2,salt2), 'v6|manifest|hmac')
+//
+// The server stores it opaquely and can never forge it (no passwords). Verified
+// on unlock (after reveal-all); re-signed automatically after every successful
+// write. `revision` is monotonic — each device keeps a high-water mark in
+// localStorage, so serving an older-but-validly-signed vault (rollback) is
+// detected too. Detection only: a compromised server can still serve modified
+// JS — this guards `lines` integrity, not the code itself.
+// ============================================================
+
+var _manifest    = null;    // current manifest string, as served
+var _signPending = false;   // suppress verify while a post-write sign is in flight
+
+// Per-instance localStorage key (multiple vaults can share this host).
+function _revStoreKey() {
+    return 'vaultRev:' + location.pathname.replace(/index\.html$/, '');
+}
+
+// localStorage can throw (private browsing) — degrade to no rollback memory.
+function _revGet() {
+    try { return parseInt(localStorage.getItem(_revStoreKey()) || '0', 10) || 0; }
+    catch (_) { return 0; }
+}
+function _revSet(n) {
+    try { localStorage.setItem(_revStoreKey(), String(n)); } catch (_) {}
+}
+
+function _parseManifest(s) {
+    if (typeof s !== 'string' || s === '') return null;
+    var p = s.split('|');
+    if (p.length !== 6 || p[0] !== 'vm1') return null;
+    if (!/^[0-9a-f]{64}$/.test(p[1]) || !/^[0-9a-f]{64}$/.test(p[2])) return null;
+    if (!/^\d{1,15}$/.test(p[3])    || !/^\d{1,15}$/.test(p[4]))    return null;
+    if (!/^[0-9a-f]{64}$/.test(p[5])) return null;
+    return { salt1Hex: p[1], salt2Hex: p[2], revision: parseInt(p[3], 10),
+             timestamp: parseInt(p[4], 10), hmacHex: p[5] };
+}
+
+// Records in canonical server form: trailing line index stripped, sorted —
+// exactly the byte sequence post.php hashes and stores (records are ASCII, so
+// the default JS sort matches PHP's SORT_STRING ordering).
+function _canonicalRecords() {
+    return _allEntries.map(function(row) {
+        return row.split('|').slice(0, -1).join('|');
+    }).sort();
+}
+
+async function _sha256Hex(str) {
+    var buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
+    return bytesToHex(new Uint8Array(buf));
+}
+
+async function _manifestHmacHex(pw, pw2, salt1Hex, salt2Hex, revision, timestamp, records) {
+    var mks = await Promise.all([
+        deriveMasterKey(pw,  hexToBytes(salt1Hex)),
+        deriveMasterKey(pw2, hexToBytes(salt2Hex))
+    ]);
+    var ikm = new Uint8Array(64);
+    ikm.set(mks[0], 0);
+    ikm.set(mks[1], 32);
+    var keyBytes = await hkdfBytes(ikm, 'v6|manifest|hmac');
+    var ck = await crypto.subtle.importKey(
+        'raw', keyBytes, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']
+    );
+    var msg = 'vm1|' + salt1Hex + '|' + salt2Hex + '|' + revision + '|' + timestamp
+            + '\n' + records.join('\n');
+    var sig = await crypto.subtle.sign('HMAC', ck, new TextEncoder().encode(msg));
+    return bytesToHex(new Uint8Array(sig));
+}
+
+// Lock or unlock the key input fields and their show/hide buttons.
+// Locked after a successful integrity check; unlocked whenever the badge is cleared.
+function _setKeyFieldsLocked(locked) {
+    ['aeskey', 'aeskey2'].forEach(function(id) {
+        var el = document.getElementById(id);
+        if (el) el.disabled = locked;
+    });
+    ['toggle-key', 'toggle-key2'].forEach(function(action) {
+        var btn = document.querySelector('[data-action="' + action + '"]');
+        if (btn) btn.disabled = locked;
+    });
+    _updateVaultKeyBar();
+}
+
+// Update both badge locations (entry-list line + About → Vault Tools).
+// cls = 'vi-ok' | 'vi-warn' | 'vi-fail' | null (hide).
+function _setIntegrityBadge(cls, text) {
+    ['vault-integrity', 'integrity-status'].forEach(function(id) {
+        var el = document.getElementById(id);
+        if (!el) return;
+        if (!cls) { el.style.display = 'none'; el.textContent = ''; el.className = ''; return; }
+        el.className     = cls;
+        el.textContent   = text;
+        el.style.display = '';
+    });
+    _setKeyFieldsLocked(cls === 'vi-ok');
+}
+
+// Verify the served manifest against the records on the page. Called after a
+// successful reveal-all (the only point where both passwords are known-good).
+async function _verifyManifest(pw, pw2) {
+    if (_signPending) return;
+    var gen     = _revealGen;
+    var records = _canonicalRecords();
+    var m       = _parseManifest(_manifest);
+    var stored  = _revGet();
+    if (!m) {
+        if (stored > 0) {
+            // This device has seen a signed vault before — a now-missing
+            // manifest is itself a tampering signal, not a fresh install.
+            _setIntegrityBadge('vi-fail', '✖ Integrity: manifest missing (this device last saw rev ' + stored + ')');
+            showToast('Vault integrity manifest is missing!');
+        } else {
+            _setIntegrityBadge('vi-warn', '⚠ Vault not signed yet — use Sign in About → Vault Tools');
+        }
+        return;
+    }
+    var h;
+    try {
+        h = await _manifestHmacHex(pw, pw2, m.salt1Hex, m.salt2Hex, m.revision, m.timestamp, records);
+    } catch (_) {
+        return;   // derivation aborted (lock mid-check) — leave badge untouched
+    }
+    // Keys changed or a write landed while we were hashing — result is stale.
+    if (gen !== _revealGen || _signPending) return;
+    if (h !== m.hmacHex) {
+        _setIntegrityBadge('vi-fail', '✖ INTEGRITY CHECK FAILED — Rev ' + m.revision + ' signature fail');
+        showToast('Vault integrity check FAILED');
+        return;
+    }
+    if (m.revision < stored) {
+        _setIntegrityBadge('vi-fail', '✖ Rollback detected — server has rev ' + m.revision + ', this device last saw rev ' + stored);
+        showToast('Vault rollback detected');
+        return;
+    }
+    _revSet(m.revision);
+    _setIntegrityBadge('vi-ok', '✓ Integrity verified · rev ' + m.revision + ' · ' + new Date(m.timestamp * 1000).toLocaleString());
+}
+
+// Sign the current record set and store the manifest server-side. Throws on
+// failure; err.stale means another client wrote since our last sync.
+async function _signVault(pw, pw2) {
+    var records = _canonicalRecords();
+    var old     = _parseManifest(_manifest);
+    // Reuse the manifest salts when present so the two Argon2id master keys hit
+    // _mkCache and signing is cheap; fresh salts only for a first-ever sign.
+    var salt1Hex = old ? old.salt1Hex : bytesToHex(crypto.getRandomValues(new Uint8Array(32)));
+    var salt2Hex = old ? old.salt2Hex : bytesToHex(crypto.getRandomValues(new Uint8Array(32)));
+    var revision = (old ? old.revision : 0) + 1;
+    // Stay monotonic past a restore: never sign below this device's high-water mark.
+    var stored = _revGet();
+    if (stored >= revision) revision = stored + 1;
+    var ts   = Math.floor(Date.now() / 1000);
+    var hmac = await _manifestHmacHex(pw, pw2, salt1Hex, salt2Hex, revision, ts, records);
+    var manifest = ['vm1', salt1Hex, salt2Hex, String(revision), String(ts), hmac].join('|');
+    var expect   = await _sha256Hex(records.join('\n'));
+    await _xhrPost('sign=1&expect_hash=' + expect + '&manifest=' + encodeURIComponent(manifest));
+    _manifest = manifest;
+    _revSet(revision);
+    _setIntegrityBadge('vi-ok', '✓ Signed · rev ' + revision + ' · ' + new Date(ts * 1000).toLocaleString());
+}
+
+// Re-sign after every successful write (save / delete / bulk). Fire-and-forget:
+// failures surface on the badge, never block the write that already happened.
+async function _signAfterWrite() {
+    var pw  = document.getElementById('aeskey').value;
+    var pw2 = document.getElementById('aeskey2').value;
+    if (!pw || !pw2) return;
+    _signPending = true;
+    _setIntegrityBadge('vi-warn', '… signing');
+    try {
+        await _signVault(pw, pw2);
+    } catch (e) {
+        if (e.stale) {
+            // Another client wrote between our write and our sign. Resync to
+            // the server's current state and sign that instead — their record
+            // change is included, nothing is lost.
+            try {
+                var text = await _xhrPost('regen=1');
+                if (_applyServerResponse(text)) _revealCachedV5Buttons();
+                await _signVault(pw, pw2);
+            } catch (_) {
+                _setIntegrityBadge('vi-warn', '⚠ Vault changed elsewhere — not signed (unlock again to re-check)');
+            }
+        } else {
+            _setIntegrityBadge('vi-warn', '⚠ Sign failed — ' + e.message);
+        }
+    } finally {
+        _signPending = false;
+    }
+}
+
+// Manual sign from About → Vault Tools — the explicit acknowledgement path
+// after a deliberate manual `lines` edit or a backup restore.
+async function resignVault() {
+    var pw  = document.getElementById('aeskey').value;
+    var pw2 = document.getElementById('aeskey2').value;
+    if (!pw || !pw2) { showToast('Enter both passwords first'); return; }
+    if (!confirm('Sign the current vault contents as authentic?\n\nOnly do this after you have verified the entries — e.g. after a deliberate manual edit or a backup restore. It resets the integrity baseline.')) return;
+    _signPending = true;
+    try {
+        await _signVault(pw, pw2);
+        showToast('Vault signed');
+    } catch (e) {
+        showToast('Sign failed — ' + e.message);
+        if (e.stale) setTimeout(function() { location.reload(); }, 1200);
+    } finally {
+        _signPending = false;
+    }
 }
 
 // ============================================================
@@ -3424,6 +3681,43 @@ function updatePWStrength() {
     wrap.style.display = '';
 }
 
+// Combined vault-key strength bar.
+// Colour thresholds use combined raw bits across both keys. They are set
+// deliberately high: _estimateBits is charset×length and badly overestimates
+// dictionary words, so the scale assumes the estimate is ~2× optimistic.
+// Argon2id's time-hardening is treated as margin, not credited as bits.
+// nLit is decoupled from colour so segments fill in every ~30 raw bits.
+function _updateVaultKeyBar() {
+    var bar    = document.getElementById('vault-key-bar');
+    var newBtn = document.querySelector('[data-action="new-entry"]');
+    if (!bar) return;
+    var k1  = document.getElementById('aeskey');
+    var k2  = document.getElementById('aeskey2');
+    var pw1 = k1 ? k1.value : '';
+    var pw2 = k2 ? k2.value : '';
+    var locked  = (k1 && k1.disabled) || (k2 && k2.disabled);
+    var bits    = _estimateBits(pw1) + _estimateBits(pw2);
+    var tooWeak = bits < 45;
+    if (newBtn) {
+        newBtn.disabled    = tooWeak;
+        newBtn.textContent = tooWeak ? 'Too Weak' : '＋ New';
+    }
+    if (locked || (!pw1 && !pw2)) { bar.style.opacity = '0'; return; }
+    bar.style.opacity = '1';
+    var color, label;
+    if      (bits < 45)  { color = '#ff5c5c'; label = 'Weak'; }
+    else if (bits < 80)  { color = '#f5a623'; label = 'Fair'; }
+    else if (bits < 115) { color = '#3fcf8e'; label = 'Strong'; }
+    else                 { color = '#4d8eff'; label = 'Very Strong'; }
+    var nLit = bits > 0 ? Math.min(4, Math.floor(bits / 30) + 1) : 0;
+    for (var i = 1; i <= 4; i++) {
+        var seg = document.getElementById('vkb-' + i);
+        if (seg) seg.style.background = i <= nLit ? color : '';
+    }
+    var lbl = document.getElementById('vault-key-lbl');
+    if (lbl) { lbl.textContent = label; lbl.style.color = color; }
+}
+
 function retestCrypto() {
     ['st-webcrypto', 'st-chacha', 'st-aes', 'st-twofish'].forEach(function(id) {
         var el = document.getElementById(id);
@@ -3577,7 +3871,8 @@ var _clickActions = {
     'export-vault':      function(el) { exportVault(); },
     'audit-vault':       function(el) { auditVault(); },
     'toggle-chpw':       function(el) { toggleChangePw(); },
-    'do-chpw':           function(el) { changeMasterPasswords(); }
+    'do-chpw':           function(el) { changeMasterPasswords(); },
+    'resign-vault':      function(el) { resignVault(); }
 };
 
 document.addEventListener('click', function(e) {
@@ -3613,22 +3908,26 @@ function _bindStaticHandlers() {
 
     // Master-key field: Tab/Enter clears + jumps to the 2nd key.
     var k1 = document.getElementById('aeskey');
+    if (k1) k1.addEventListener('input', _updateVaultKeyBar);
     if (k1) k1.addEventListener('keydown', function(e) {
         if (e.key === 'Tab' || e.key === 'Enter') {
             e.preventDefault();
             var k2 = document.getElementById('aeskey2');
             k2.value = '';
+            _updateVaultKeyBar();
             k2.focus();
         }
     });
 
     // Secondary-key field: Shift+Tab clears + jumps back to the primary key.
     var k2 = document.getElementById('aeskey2');
+    if (k2) k2.addEventListener('input', _updateVaultKeyBar);
     if (k2) k2.addEventListener('keydown', function(e) {
         if (e.key === 'Tab' && e.shiftKey) {
             e.preventDefault();
             var k1b = document.getElementById('aeskey');
             k1b.value = '';
+            _updateVaultKeyBar();
             k1b.focus();
         }
     });
@@ -3658,9 +3957,10 @@ document.addEventListener('DOMContentLoaded', function() {
 
     var k1 = document.getElementById('aeskey');
     var k2 = document.getElementById('aeskey2');
-    if (k1) k1.addEventListener('input', _relockV5Entries);
+    if (k1) { k1.addEventListener('input', _relockV5Entries); k1.addEventListener('input', _updateVaultKeyBar); }
     if (k2) {
         k2.addEventListener('input', _relockV5Entries);
+        k2.addEventListener('input', _updateVaultKeyBar);
         k2.addEventListener('blur', function() {
             var pw  = k1 ? k1.value : '';
             var pw2 = k2.value;
@@ -3680,10 +3980,14 @@ document.addEventListener('DOMContentLoaded', function() {
     initCrypto();
     runPageLoadSelfTest();
     _initMaskedInputs();
+    _updateVaultKeyBar();
     var copyBtn = document.getElementById('copy-button');
     if (copyBtn) copyBtn.disabled = true;
     resizeFreezePane();
     _initEntries();
+    // Pick up the integrity manifest embedded by post.php (verified on unlock).
+    var mEl = document.getElementById('vault-manifest');
+    _manifest = (mEl && mEl.dataset.manifest) ? mEl.dataset.manifest : null;
     window.scrollTo(0, 0);
     document.getElementById('aeskey').focus();
 });
@@ -3698,6 +4002,7 @@ function deleteEntry() {
         _xhrPost('delete_rec=' + encodeURIComponent(deleteEntryRecord))
             .then(function(text) {
                 try { if (_applyServerResponse(text)) _revealCachedV5Buttons(); } catch (_) { location.reload(); return; }
+                _signAfterWrite();
                 clearDisplay();
             })
             .catch(function(e) {

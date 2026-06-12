@@ -151,12 +151,14 @@
 
       <div class="about-section" id="about-vault-tools">
         <h3>Vault Tools</h3>
-        <p><strong>Export</strong> downloads the encrypted database exactly as stored on the server (ciphertext only). <strong>Audit</strong> decrypts every entry locally and flags reused, weak, or empty passwords — names only are shown and nothing leaves this device. <strong>Change Passwords</strong> re-encrypts the whole vault under new master passwords in one atomic save.</p>
+        <p><strong>Export</strong> downloads the encrypted database exactly as stored on the server (ciphertext only). <strong>Audit</strong> decrypts every entry locally and flags reused, weak, or empty passwords — names only are shown and nothing leaves this device. <strong>Change Passwords</strong> re-encrypts the whole vault under new master passwords in one atomic save. <strong>Sign</strong> stores a keyed signature (HMAC under your master passwords) over the whole vault; it is checked automatically on every unlock and refreshed after every save, so tampering, corruption, or a rolled-back copy is detected. Use the button only to accept a deliberate manual edit or backup restore as the new baseline.</p>
         <div class="vt-btns">
           <button class="btn btn-ghost" data-action="export-vault" data-tip="Download the encrypted database">&#x2B07;&#xFE0E; Export</button>
           <button class="btn btn-ghost" data-action="audit-vault" data-tip="Find reused / weak passwords (local only)">&#x1F50E;&#xFE0E; Audit</button>
           <button class="btn btn-ghost" data-action="toggle-chpw" data-tip="Re-encrypt the vault under new passwords">&#x1F511;&#xFE0E; Change Passwords</button>
+          <button class="btn btn-ghost" data-action="resign-vault" data-tip="Sign the current contents as the new integrity baseline">&#x270D;&#xFE0E; Sign</button>
         </div>
+        <div id="integrity-status" style="display:none"></div>
         <div id="audit-result" style="display:none"></div>
         <div id="chpw-form" style="display:none">
           <p class="chpw-note">Current passwords are taken from the two key fields above. Every entry is decrypted and re-encrypted in your browser, then saved in a single atomic replace — if anything fails, the vault is left untouched.</p>
@@ -208,6 +210,21 @@
         <div style="margin-top:10px;text-align:right">
           <button class="btn-retest" data-action="retest-crypto">&#x21bb; Retest</button>
         </div>
+      </div>
+
+      <div class="about-section" id="about-vault-signing">
+        <h3>Vault Signing</h3>
+        <p>Every save automatically signs the entire record set with a <strong>keyed HMAC</strong> that only a password holder can produce. The server stores the signature opaquely — it has no access to your passwords and can never forge or verify it. On every unlock, the browser recomputes the signature over the records it received and compares. Any discrepancy — an entry tampered with, silently deleted, or corrupted — is shown as a red failure badge rather than passing unnoticed.</p>
+        <p style="margin-top:8px"><strong>Signature construction</strong></p>
+        <table class="cr-table" style="margin-top:4px">
+          <tr><td class="cr-name">Vault key</td><td class="cr-desc">HKDF-SHA-256 over <code>Argon2id(pw1, salt1) ‖ Argon2id(pw2, salt2)</code>, info <code>v6|manifest|hmac</code> — independent of every per-record key</td></tr>
+          <tr><td class="cr-name">Signed data</td><td class="cr-desc">Header fields (format, salts, revision, timestamp) + every record joined in canonical server order</td></tr>
+          <tr><td class="cr-name">Algorithm</td><td class="cr-desc">HMAC-SHA-256 via WebCrypto</td></tr>
+          <tr><td class="cr-name">Revision</td><td class="cr-desc">Monotonic counter incremented on every sign; each device remembers the highest revision it has seen, so a validly signed but older copy of the vault raises a <strong>rollback</strong> alert</td></tr>
+        </table>
+        <p style="margin-top:8px"><strong>Manifest format</strong> (stored server-side, embedded in the served page):</p>
+        <pre style="font-size:11px;margin-top:4px;padding:8px;background:var(--bg);border:1px solid var(--border);border-radius:var(--r);overflow-x:auto">vm1 | salt1 | salt2 | revision | timestamp | hmac</pre>
+        <p style="margin-top:8px"><strong>Limits:</strong> this is tamper <em>detection</em> for the data file. It guards against corruption, botched restores, and manual-edit mistakes. It cannot defend against an adversary who can also rewrite the served JavaScript — no in-band scheme can.</p>
       </div>
 
       <div class="about-section">

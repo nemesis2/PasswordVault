@@ -35,7 +35,9 @@ The vault is a single page served by any PHP-capable web server. Unlocking it ta
 - 🕶 **Encrypted entry names** — the stored database leaks no metadata; the entry grid shows 🔒 placeholders until both passwords are entered
 - 🔢 **Built-in 2FA (TOTP)** — stores authenticator secrets and shows live 6-digit codes with a countdown ring; import secrets by scanning a QR code
 - 🎲 **Password generator** — configurable character sets, length- or entropy-targeted, with a live strength meter
-- 🧰 **Vault tools** — one-click encrypted export, a local-only password audit (reused / weak / empty), and whole-vault master-password rotation
+- 📊 **Vault-key strength indicator** — a combined strength bar for both master passwords updates live as you type; the ＋ New button is disabled (labeled **"Too Weak"**) until the combined entropy exceeds 45 bits, blocking new entries under trivially guessable keys
+- 🧰 **Vault tools** — one-click encrypted export, a local-only password audit (reused / weak / empty), whole-vault master-password rotation, and integrity signing
+- 🔏 **Integrity manifest** — a keyed HMAC-SHA-256 over the entire record set (signed under both master passwords) is verified on every unlock; tampering, corruption, and rolled-back copies are detected with a badge above the entry list
 - 🔍 **Live search**, ✏ **edit**, 🗑 **delete**, and instant in-place grid updates — no page reloads
 - ⏱ **Auto-lock** after 5 minutes idle (with a 60-second warning), instant lock on double-Escape, and **clipboard auto-clear** 45 seconds after copying a secret
 - 🧪 **Runtime self-test** — every cipher and the Argon2id WASM are verified on every page load; failures raise a warning before you type a password
@@ -100,6 +102,19 @@ Both are required. Enter them once per session; the eye button (👁) toggles vi
 
 Entry buttons are hidden on page load because names are encrypted. When both passwords are entered and you tab or click away from the second field, all names decrypt in parallel (across the Web Worker pool) and the grid reveals in alphabetical order.
 
+A **vault-key strength bar** (four segments) sits below the key fields and shows the combined entropy of both passwords while you type. The estimate uses character-class pool size × length, summed across both keys:
+
+| Label | Combined entropy |
+|-------|-----------------|
+| Weak | < 45 bits |
+| Fair | 45 – 79 bits |
+| Strong | 80 – 114 bits |
+| Very Strong | ≥ 115 bits |
+
+While the combined total is below **45 bits**, the **＋ New** button is replaced with **"Too Weak"** and adding entries is blocked — this prevents encrypting new secrets under easily guessable master passwords. The bar is hidden when both fields are empty or after the integrity lock engages (see below).
+
+Once both passwords decrypt the vault and the integrity check passes (**✓ Integrity verified**), both key fields and their visibility toggles are **disabled** for the rest of the session. This prevents accidentally editing a master password after names are revealed. Typing in either field immediately re-enables the inputs, re-hides all decrypted names, and clears the integrity badge — a full re-unlock (tab away from the second field) is required.
+
 ### Viewing an entry
 
 Click any entry button. The fixed panel at the top fills in with the decrypted fields:
@@ -141,7 +156,7 @@ Click **＋ New** and fill in any combination of:
 
 #### Strength meter
 
-A four-segment bar estimates the typed password's entropy from its character classes × length:
+A four-segment bar estimates the typed **entry password**'s entropy from its character classes × length:
 
 | Label | Entropy |
 |-------|---------|
@@ -150,17 +165,31 @@ A four-segment bar estimates the typed password's entropy from its character cla
 | Strong | 80 – 119 bits |
 | Very Strong | ≥ 120 bits |
 
+This bar measures only the entry's stored password field. The separate **vault-key strength bar** above the entry list measures the combined master-password strength — see [*Unlocking*](#unlocking).
+
 ### Editing and deleting
 
 Decrypt an entry, then use the ✏ (edit) or 🗑 (delete, with confirmation) buttons in the decode panel. Edits are an atomic replace; deletes reference the record **by content**, so a change made meanwhile in another tab or on another device can never cause the wrong entry to be removed — if the entry changed under you, the vault answers "Entry was changed elsewhere" and refreshes instead.
 
 ### Vault tools
 
-In the About panel (ℹ), the **Vault Tools** section offers three whole-vault operations:
+In the About panel (ℹ), the **Vault Tools** section offers four whole-vault operations:
 
 - **⬇ Export** — downloads the encrypted database as `vault-export-YYYY-MM-DD.lines`, built entirely in the browser and byte-identical to the server's data file. Ciphertext only, safe to store as an offline backup.
 - **🔎 Audit** — decrypts every entry locally (both passwords required) and reports **reused**, **weak** (< 40 bits), and **empty** passwords. Only entry names are shown, and nothing leaves the device — there are no breach-check API calls by design (the CSP forbids all outbound connections).
-- **🔑 Change Passwords** — rotates both master passwords: every entry is decrypted with the current passwords and re-encrypted under the new ones (fresh salts and nonces) in the browser, then committed to the server as **one atomic replace**. All-or-nothing: if any record fails to decrypt, or the vault changed mid-run from another device, nothing is modified. On success the session switches to the new passwords seamlessly.
+- **🔑 Change Passwords** — rotates both master passwords: every entry is decrypted with the current passwords and re-encrypted under the new ones (fresh salts and nonces) in the browser, then committed to the server as **one atomic replace**. All-or-nothing: if any record fails to decrypt, or the vault changed mid-run from another device, nothing is modified. On success the session switches to the new passwords seamlessly (and the vault is re-signed under them).
+- **✍ Sign** — manually re-signs the **integrity manifest** (see below). Only needed to accept a deliberate manual edit of the data file or a backup restore as the new baseline; normal saves re-sign automatically.
+
+### Vault integrity manifest
+
+The vault carries a **keyed signature over the entire record set** — an HMAC-SHA-256 whose key is derived from *both master passwords* (Argon2id + HKDF). The server stores it but can never compute it, so only a password holder can produce a valid signature.
+
+- **Verified on every unlock:** after the entry names are revealed, the browser recomputes the signature over the records it received and compares. A mismatch — an entry added, modified, or removed behind your back, or silent corruption — shows a red **integrity failure** badge instead of passing unnoticed. Per-record encryption alone can't catch this: each record authenticates itself, but nothing else binds the *set* together.
+- **Rollback detection:** the manifest embeds a monotonically increasing **revision number**, and each device remembers the highest revision it has seen (in browser storage). Being served an older — validly signed — copy of the vault raises a rollback alarm.
+- **Automatic re-signing:** every save, edit, delete, and password change re-signs the vault (revision +1). If another device wrote concurrently, the client resyncs and signs the merged state.
+- **Status badge:** a line above the entry list (and in Vault Tools) shows ✓ verified with revision and timestamp, ⚠ unsigned, or a red failure/rollback alert.
+- **Key-field lock:** a passing integrity check also *disables* both master-password input fields and their visibility toggles for the rest of the session. This prevents accidentally changing a master password after the vault has been verified and names are revealed. Typing in either key field re-enables them, clears the badge, and re-hides all decrypted names — a full re-unlock is required.
+- **Honest limits:** this is tamper *detection* for the data file, in-band. It protects against corruption, botched restores, manual-edit mistakes, and tampering by anything that can't also rewrite the served JavaScript. An attacker who fully controls the server (and can serve modified code) defeats it — no in-band scheme can prevent that.
 
 ### Locking
 
@@ -196,6 +225,7 @@ Hover any button or interactive field for a brief description of what it does.
 - **Write logins are rate-limited.** After 5 failed Basic-Auth attempts from one IP within 15 minutes, further attempts get `429` until the window clears. Blocked attempts don't extend the lockout; a success clears the history. The limiter fails open if its temp-dir state can't be written, so a misconfiguration can't lock you out of your own server.
 - **Wrong keys fail hard.** The AEAD layers authenticate the ciphertext — there is no partial or garbled decryption.
 - **The database leaks nothing.** Entries are ciphertext in a flat text file; names are encrypted too. Read access to the file is useless without both master passwords.
+- **The record set is signed on every write.** A keyed HMAC (HMAC-SHA-256, key derived from both master passwords via Argon2id + HKDF) covers the entire sorted record set and is re-stored after every save. Verified on every unlock — tampering, silent deletion, corruption, and rolled-back copies are caught before you act on the data. The server stores the signature opaquely and cannot forge or verify it.
 - **Key derivation is memory-hard.** Argon2id at 64 MiB per guess reduces a GPU farm that tests billions of fast hashes per second to a few thousand guesses per second per card.
 - **Sessions are containable.** Auto-lock, double-Escape lock, clipboard auto-clear, and teardown of the worker pool (whose WASM heaps hold residual key material) all bound how long secrets stay in memory.
 - **Server files are blocked from HTTP access** by the bundled `.htaccess` files — **on Apache only**. nginx ignores `.htaccess` entirely; apply the rules under [*Deploying behind nginx*](#deploying-behind-nginx) or the database file, templates, and backups are downloadable (ciphertext, but block them regardless).
@@ -223,11 +253,12 @@ Hover any button or interactive field for a brief description of what it does.
 | `argon2-worker.js` | The Argon2id Web Worker (hash-wasm bundle + a small message handler) |
 | `part1` / `part2` | HTML template fragments; `post.php` splices the entry buttons between them |
 | `lines` | The flat-file ciphertext database, one record per line, sorted |
+| `manifest` | The vault integrity manifest — a client-computed HMAC stored opaquely by the server; absent until the vault is first signed |
 | `post.php` | The only server-side code: validates, locks, backs up, writes, and rebuilds the page |
 | `bak/` | Automatic pre-write backups of `lines` (newest 50 kept) |
 | `.htaccess` | Apache-only access rules and security headers |
 
-The server-side write API is deliberately tiny: `data=` (add), `delete_rec=` (delete by content), both together (atomic edit), `bulk=1` (atomic whole-vault replace for password rotation), and `regen=1` (rebuild the page without touching data). Everything is validated against the strict v6 record shape before a byte is written.
+The server-side write API is deliberately tiny: `data=` (add), `delete_rec=` (delete by content), both together (atomic edit), `bulk=1` (atomic whole-vault replace for password rotation), `sign=1` (store an integrity manifest without touching records), and `regen=1` (rebuild the page without touching data). Everything is validated against the strict v6 record shape before a byte is written.
 
 ---
 
@@ -247,11 +278,11 @@ correct but protect nothing.)
 
 The rules below assume a `/pass/<instance>/` sub-path layout and cover **every** instance at
 once via `[^/]+`. If you serve a single vault at the site root, drop the `/pass/[^/]+` prefix
-(e.g. `location ~ /(lines|part1|part2)$`).
+(e.g. `location ~ /(lines|manifest|part1|part2)$`).
 
 ```nginx
 # Block the flat-file DB and HTML templates for every vault instance.
-location ~ /pass/[^/]+/(lines|part1|part2)$ {
+location ~ /pass/[^/]+/(lines|manifest|part1|part2)$ {
     deny all;
 }
 
@@ -325,7 +356,7 @@ The cryptographic primitives are third-party open-source implementations, bundle
 
 **Serpent-256** is **not** an npm dependency — no maintained package exists. It is a hand-written bitslice implementation of the forward block cipher (inlined into `javascript.js`), verified against [Bouncy Castle](https://www.bouncycastle.org/)'s 256-bit ECB test vectors. The Serpent cipher itself is in the public domain, designed by [Ross Anderson, Eli Biham, and Lars Knudsen](https://www.cl.cam.ac.uk/~rja14/serpent.html).
 
-**AES-256-GCM, HKDF-SHA-256, and HMAC-SHA-1 (TOTP)** use the browser's native [WebCrypto API](https://developer.mozilla.org/en-US/docs/Web/API/Web_Crypto_API) — no third-party code.
+**AES-256-GCM, HKDF-SHA-256, HMAC-SHA-256 (vault signing), and HMAC-SHA-1 (TOTP)** use the browser's native [WebCrypto API](https://developer.mozilla.org/en-US/docs/Web/API/Web_Crypto_API) — no third-party code.
 
 **Build tooling (not shipped at runtime):** the npm bundles are produced with [esbuild](https://github.com/evanw/esbuild) (MIT — Evan Wallace). It is a development dependency only; no part of esbuild is served to the browser.
 
