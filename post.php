@@ -46,6 +46,19 @@ const BAK_KEEP = 50;
 // master-password-change flow). ~100× the current DB size.
 const BULK_MAX_BYTES = 4194304;
 
+// ---- Vault-wide Argon2id cost (KDF params) ----
+// The Argon2id memory/time/parallelism are vault-wide and user-tunable. They are
+// stored opaquely in the `kdfparams` file and embedded in index.html, so the
+// read-only/offline client (index.html + javascript.js, no server) can still
+// derive keys. Not secret — KDF params sit next to the salt, like a PHC hash
+// string. Bounds mirror the client UI so neither a user nor a forged write can
+// plant dangerously weak params. Shape: a2id | memKiB | iterations | parallelism.
+const KDF_DEFAULT  = 'a2id|131072|3|1';  // 128 MiB, t=3, p=1 (the historical hardcoded value)
+const KDF_MEM_MIN  = 65536;              // 64 MiB
+const KDF_MEM_MAX  = 1048576;            // 1 GiB
+const KDF_TIME_MIN = 2;
+const KDF_TIME_MAX = 10;
+
 function rl_file_path() {
     $ip  = $_SERVER['REMOTE_ADDR'] ?? 'unknown';
     $dir = sys_get_temp_dir() . '/vault-auth-rl';
@@ -216,22 +229,42 @@ function is_valid_manifest($s) {
     return true;
 }
 
+// ---- KDF params validation ----
+// Shape check + bounds for the vault-wide Argon2id cost (see KDF_* constants).
+// a2id | memKiB | iterations | parallelism, all-digit fields, p fixed at 1.
+function is_valid_kdf($s) {
+    if (!is_string($s) || strlen($s) > 64) return false;
+    $p = explode('|', $s);
+    if (count($p) !== 4 || $p[0] !== 'a2id') return false;
+    for ($i = 1; $i <= 3; $i++) {
+        if ($p[$i] === '' || strlen($p[$i]) > 10 || !ctype_digit($p[$i])) return false;
+    }
+    $m = (int)$p[1]; $t = (int)$p[2]; $pp = (int)$p[3];
+    if ($m < KDF_MEM_MIN || $m > KDF_MEM_MAX) return false;
+    if ($t < KDF_TIME_MIN || $t > KDF_TIME_MAX) return false;
+    if ($pp !== 1) return false;
+    return true;
+}
+
 // ---- Input validation ----
 // Skipped entirely in regen mode (no record is read from the request).
 $data       = null;
 $de         = -1;
 $delete_rec = null;   // delete-by-content: the full record string to remove
-$bulk       = false;  // whole-vault replace (master-password change)
+$bulk       = false;  // whole-vault replace (master-password change OR restore)
+$restore    = false;  // whole-vault replace that may change the record count (import)
 $bulk_lines = null;
 $expect_hash = '';
 $sign        = false; // store a new integrity manifest (no record change)
 $manifest_in = null;
+$kdf_in      = null;  // new vault-wide Argon2id params (only valid on the bulk path)
 if (!$regen) {
-    $bulk = isset($_POST['bulk']);
+    $restore = isset($_POST['restore']);
+    $bulk = isset($_POST['bulk']) || $restore;   // restore reuses the bulk write path
     $sign = isset($_POST['sign']);
     if ($sign) {
         // Sign is exclusive — it changes no record, only the manifest file.
-        if ($bulk || isset($_POST['data']) || isset($_POST['delete']) || isset($_POST['delete_rec'])) {
+        if ($bulk || isset($_POST['data']) || isset($_POST['delete']) || isset($_POST['delete_rec']) || isset($_POST['kdf'])) {
             http_response_code(400);
             exit('Invalid data');
         }
@@ -268,6 +301,15 @@ if (!$regen) {
                 exit('Invalid data');
             }
         }
+        // Optional new vault-wide KDF params (sent by the Change KDF Parameters
+        // flow). Written to `kdfparams` atomically with the lines replace below.
+        if (isset($_POST['kdf'])) {
+            $kdf_in = $_POST['kdf'];
+            if (!is_valid_kdf($kdf_in)) {
+                http_response_code(400);
+                exit('Invalid data');
+            }
+        }
     } else {
         $data       = isset($_POST['data']) ? $_POST['data'] : null;
         $de         = isset($_POST['delete']) ? intval($_POST['delete']) : -1;
@@ -291,6 +333,12 @@ if (!$regen) {
 
         // Reject anything that is not a well-formed v6 record
         if ($data !== null && !is_valid_record($data)) {
+            http_response_code(400);
+            exit('Invalid data');
+        }
+
+        // KDF params may only change as part of a whole-vault re-encode (bulk).
+        if (isset($_POST['kdf'])) {
             http_response_code(400);
             exit('Invalid data');
         }
@@ -343,9 +391,12 @@ if (!$regen) {
         // The client hashes the record list it re-encrypted (records joined
         // with "\n", no trailing newline). A mismatch means `lines` changed
         // under it, so its re-encryption is incomplete — refuse the replace.
+        // Restore (import) intentionally replaces with a possibly different record
+        // count, so the count-equality guard is skipped for it; expect_hash still
+        // fully detects any concurrent write either way.
         $have_hash = hash('sha256', implode("\n", $array));
         if (!hash_equals($have_hash, $expect_hash)
-            || count($bulk_lines) !== count($array)) {
+            || (!$restore && count($bulk_lines) !== count($array))) {
             respond_stale($linesfp);
         }
     } elseif ($delete_rec !== null) {
@@ -425,6 +476,17 @@ if ($regen || $sign) {
         exit('Write failed');
     }
     fflush($linesfp);
+
+    // New vault-wide KDF params ride along with the bulk re-encode that produced
+    // the records just written, so `lines` and `kdfparams` always agree. Written
+    // under the same `lines` flock, after the records are safely on disk.
+    if ($bulk && $kdf_in !== null) {
+        if (@file_put_contents('kdfparams', $kdf_in . "\n") === false) {
+            http_response_code(500);
+            exit('Write failed');
+        }
+        @chmod('kdfparams', 0600);
+    }
 }
 
 // ---- Current manifest (for the index.html embed and the JSON response) ----
@@ -438,6 +500,19 @@ if ($manifest_out === null) {
         if (is_valid_manifest($m)) $manifest_out = $m;
     }
 }
+
+// ---- Current KDF params (for the index.html embed and the JSON response) ----
+// In a bulk that carried new params it is the one just stored; otherwise read the
+// `kdfparams` file, tolerating absence/corruption by falling back to the default.
+$kdf_out = ($bulk && $kdf_in !== null) ? $kdf_in : null;
+if ($kdf_out === null) {
+    $k = @file_get_contents('kdfparams');
+    if (is_string($k)) {
+        $k = trim($k);
+        if (is_valid_kdf($k)) $kdf_out = $k;
+    }
+}
+if ($kdf_out === null) $kdf_out = KDF_DEFAULT;
 
 // ---- Rebuild index.html from templates + entries ----
 $array1 = file('part1');
@@ -472,6 +547,11 @@ for ($x = 0; $x < $asize; $x++) {
 $mv = htmlspecialchars($manifest_out === null ? '' : $manifest_out, ENT_QUOTES | ENT_HTML5, 'UTF-8');
 $array1[] = "<span id=\"vault-manifest\" hidden data-manifest=\"$mv\"></span>\n";
 
+// Embed the vault-wide Argon2id params so the read-only/offline client (index.html
+// + javascript.js, no server) can derive keys. Hidden carrier; JS reads data-kdf.
+$kv = htmlspecialchars($kdf_out, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+$array1[] = "<span id=\"vault-kdf\" hidden data-kdf=\"$kv\"></span>\n";
+
 $array2 = file('part2');
 if ($array2 === false) {
     http_response_code(500);
@@ -495,7 +575,7 @@ foreach ($array as $i => $line) {
     }
 }
 echo json_encode(['ok' => true, 'regen' => $regen, 'sign' => $sign,
-                  'manifest' => $manifest_out, 'entries' => $entries]);
+                  'manifest' => $manifest_out, 'kdf' => $kdf_out, 'entries' => $entries]);
 
 // Release the exclusive lock held since the start of the critical section.
 // (PHP would also release it on script end, but free it explicitly.)

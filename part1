@@ -23,7 +23,11 @@
   --accent-h:    #6ba3ff;
   --danger:      #ff5c5c;
   --danger-h:    #ff7a7a;
+  --danger-rgb:  255,92,92;
   --green:       #3fcf8e;
+  --green-rgb:   63,207,142;
+  --warn:        #f5a623;
+  --warn-rgb:    245,166,35;
   --mono:        'SF Mono','Cascadia Code','Fira Mono',Consolas,monospace;
   --r:           6px;
   --shadow:      0 8px 24px rgba(0,0,0,.5);
@@ -57,11 +61,13 @@ body {
 #fixedDiv {
   position: fixed;
   top: 0; left: 0; right: 0;
-  margin: 0 auto;
-  width: 100%; max-width: 480px;
+  margin: 0;
+  width: 100%; max-width: 680px;
   z-index: 200;
   background: var(--surface);
   border-bottom: 1px solid var(--border);
+  border-left: 1px solid var(--border);
+  border-right: 1px solid var(--border);
   box-shadow: var(--shadow);
 }
 
@@ -91,7 +97,7 @@ body {
   border: none;
   cursor: pointer;
   color: var(--text-2);
-  font-size: 16px;
+  font-size: 15px;
   padding: 3px 5px;
   border-radius: var(--r);
   transition: color .15s, background .15s;
@@ -188,6 +194,12 @@ body {
 /* ─── Scrollable body ─────────────────────────────────────── */
 #content {
   padding: 12px;
+}
+/* When the control panel isn't floated out to the side, keep the content
+   column no wider than the display panel (left-aligned beneath it). */
+body:not(.wide-controls) #content {
+  box-sizing: border-box;
+  max-width: var(--panel-w, 676px);
 }
 
 /* ─── Control bar ─────────────────────────────────────────── */
@@ -289,6 +301,54 @@ body {
   gap: 8px;
 }
 
+/* ─── Wide-viewport mode ──────────────────────────────────────
+   Narrow/mobile (base rules above): capped 480px, centered, 2 cols.
+   At >=560px (where a 3rd 160px tile first fits) the page goes
+   left-aligned and the entry grid fans out into more columns, while
+   the fixed decode panel stays capped for readability. */
+@media (min-width: 560px) {
+  body { max-width: 1680px; margin: 0; }
+  .entry-grid { grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); }
+}
+
+/* ─── Control bar ─────────────────────────────────────────────
+   Layout lives here (not inline) so wide-controls mode can override
+   position without an !important battle against inline styles. */
+.ctrl-form {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 6px;
+  align-items: center;
+  margin-bottom: 12px;
+  position: relative;   /* positioning context for the autofill honeypot */
+}
+
+/* Wide screens: float the control cluster into the empty space to the
+   right of the fixed panel (toggled by resizeFreezePane via body class;
+   --panel-w is the live panel width). Styled as a card matching #fixedDiv. */
+body.wide-controls .ctrl-form {
+  position: fixed;
+  top: 0;
+  left: var(--panel-w);   /* flush against the display panel, no gap */
+  right: 0;               /* fill all remaining width */
+  width: auto;
+  box-sizing: border-box;   /* JS-set height includes padding + border */
+  grid-template-rows: auto auto 1fr;  /* controls top, count row fills to bottom */
+  z-index: 200;
+  margin: 0;
+  background: var(--surface);
+  border: none;
+  border-bottom: 1px solid var(--border);
+  border-left: 1px solid var(--border);
+  box-shadow: var(--shadow);
+  padding: 12px;
+}
+body.wide-controls .ctrl-form #entry-count-row {
+  grid-column: 1 / -1;   /* span full width of the control panel */
+  align-self: end;       /* pin to the bottom of the flexible row */
+  margin-bottom: 0;
+}
+
 .entry-btn {
   background: var(--card);
   border: 1px solid var(--border);
@@ -302,16 +362,21 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  transition: color .15s;
+  transition: color .15s, background .15s, border-color .15s, transform .12s ease, box-shadow .15s;
 }
 .entry-btn:hover {
   background: var(--elevated);
   border-color: var(--border-2);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(0,0,0,.28);
 }
+.entry-btn:active { transform: translateY(0); box-shadow: none; }
 .entry-btn.selected {
   background: var(--elevated);
   border-color: var(--accent);
   color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent), 0 4px 14px rgba(77,142,255,.18);
+  transform: none;
   transition: none;
 }
 
@@ -370,7 +435,7 @@ body {
 .pw-frow .flabel { padding-top: 5px; }
 .pw-strength-wrap { display: flex; align-items: center; gap: 8px; padding: 5px 0 2px; }
 .pw-segs { display: flex; gap: 4px; }
-.pw-seg { width: 36px; height: 4px; border-radius: 2px; background: var(--border); transition: background .25s; }
+.pw-seg { width: 24px; height: 4px; border-radius: 2px; background: var(--border); transition: background .25s; }
 .pw-strength-lbl { font-size: 11px; font-weight: 600; font-family: var(--mono); transition: color .25s; }
 .pw-entropy-lbl { font-size: 11px; color: var(--text-3); font-family: var(--mono); margin-left: auto; }
 #vault-key-bar { margin-top: -8px; height: 12px; display: flex; align-items: center; gap: 8px; pointer-events: none; opacity: 0; transition: opacity .25s; }
@@ -541,6 +606,12 @@ body {
   color: var(--text-2);
   white-space: nowrap;
 }
+#worker-count {
+  font-size: 11px;
+  color: var(--accent);
+  white-space: nowrap;
+  margin-right: 10px;
+}
 #integrity-status {
   margin-top: 10px;
   background: var(--card);
@@ -550,14 +621,14 @@ body {
   font-size: 12px;
 }
 #vault-integrity.vi-ok,   #integrity-status.vi-ok   { color: var(--green); }
-#vault-integrity.vi-warn, #integrity-status.vi-warn { color: #f5a623; }
+#vault-integrity.vi-warn, #integrity-status.vi-warn { color: var(--warn); }
 #vault-integrity.vi-fail, #integrity-status.vi-fail { color: var(--danger); font-weight: 700; }
 
 /* ─── Search overlay ──────────────────────────────────────── */
 #search-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0,0,0,.55);
+  background: rgba(0,0,0,.6);
   z-index: 400;
   display: none;
   align-items: flex-start;
@@ -622,10 +693,10 @@ body {
   bottom: 28px;
   left: 50%;
   transform: translateX(-50%) translateY(12px);
-  background: rgba(255,160,0,.1);
-  border: 1px solid rgba(255,160,0,.45);
+  background: rgba(var(--warn-rgb),.1);
+  border: 1px solid rgba(var(--warn-rgb),.45);
   border-radius: 20px;
-  color: #ffb347;
+  color: var(--warn);
   font-size: 13px;
   font-weight: 500;
   padding: 7px 14px;
@@ -640,16 +711,16 @@ body {
 }
 #lock-warning.show { opacity: 1; transform: translateX(-50%) translateY(0); pointer-events: auto; }
 #lock-stay {
-  background: rgba(255,160,0,.2);
-  border: 1px solid rgba(255,160,0,.5);
+  background: rgba(var(--warn-rgb),.2);
+  border: 1px solid rgba(var(--warn-rgb),.5);
   border-radius: 12px;
-  color: #ffb347;
+  color: var(--warn);
   cursor: pointer;
   font-size: 12px;
   font-weight: 600;
   padding: 2px 10px;
 }
-#lock-stay:hover { background: rgba(255,160,0,.35); }
+#lock-stay:hover { background: rgba(var(--warn-rgb),.35); }
 
 /* ─── Edit-form notes auto-resize ────────────────────────── */
 #notes { overflow: hidden; }
@@ -686,11 +757,40 @@ body {
 [data-action="export-vault"][data-tip]::after { left: 0; transform: none; }
 [data-action="resign-vault"][data-tip]::after { left: auto; right: 0; transform: none; }
 
+/* About-modal tooltips can't use the ::after technique: #about-body is a scroll
+   container (overflow-y:auto forces overflow-x:auto) and #about-box is
+   overflow:hidden, so an absolutely-positioned tooltip is clipped at the modal
+   edges. Suppress the pseudo-tooltip there and render via a position:fixed layer
+   appended to <body> (#js-tooltip, positioned by _initAboutTooltips) that escapes
+   every overflow ancestor. */
+#about-body [data-tip]::after { content: none; display: none; }
+#js-tooltip {
+  position: fixed;
+  z-index: 9600;
+  background: var(--elevated);
+  border: 1px solid var(--border-2);
+  border-radius: 4px;
+  color: var(--text);
+  font-size: 11px;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+  font-weight: 400;
+  line-height: 1.4;
+  padding: 4px 9px;
+  max-width: 260px;
+  white-space: normal;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity .15s;
+  box-shadow: 0 2px 8px rgba(0,0,0,.45);
+  display: none;
+}
+#js-tooltip.show { display: block; opacity: 1; }
+
 /* ─── About modal ──────────────────────────────────────────── */
 #about-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0,0,0,.65);
+  background: rgba(0,0,0,.6);
   z-index: 800;
   display: none;
   align-items: center;
@@ -704,7 +804,7 @@ body {
   border-radius: var(--r);
   box-shadow: 0 12px 40px rgba(0,0,0,.7);
   width: 100%;
-  max-width: 440px;
+  max-width: 600px;
   max-height: 82vh;
   display: flex;
   flex-direction: column;
@@ -785,8 +885,8 @@ body {
   align-items: baseline;
 }
 .sg-name { font-family: var(--mono); color: var(--text); white-space: nowrap; }
-.sg-met { color: #3fcf8e; font-weight: 600; white-space: nowrap; }
-.sg-partial { color: #f5a623; font-weight: 600; white-space: nowrap; }
+.sg-met { color: var(--green); font-weight: 600; white-space: nowrap; }
+.sg-partial { color: var(--warn); font-weight: 600; white-space: nowrap; }
 .sg-desc { color: var(--text-2); }
 .about-section code {
   font-family: var(--mono);
@@ -801,7 +901,7 @@ body {
 .about-section a { color: var(--accent); text-decoration: none; }
 .about-section a:hover { color: var(--accent-h); text-decoration: underline; }
 /* Vault tools (export / audit / change passwords) */
-.vt-btns { display: flex; gap: 6px; flex-wrap: nowrap; margin-top: 8px; }
+.vt-btns { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
 .vt-btns .btn { font-size: 12px; padding: 6px 10px; }
 #audit-result {
   margin-top: 10px;
@@ -813,15 +913,33 @@ body {
 }
 .audit-line { margin-bottom: 4px; }
 .audit-line:last-child { margin-bottom: 0; }
+.vt-locked-note {
+  margin-top: 10px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--warn);
+  border-radius: 4px;
+  padding: 8px 10px;
+  font-size: 12px;
+  color: var(--warn);
+}
 .audit-ok   { color: var(--green); }
-.audit-bad  { color: #ff5c5c; }
-.audit-warn { color: #f5a623; }
+.audit-bad  { color: var(--danger); }
+.audit-warn { color: var(--warn); }
 #chpw-form {
   margin-top: 10px;
   background: var(--card);
   border: 1px solid var(--border);
   border-radius: 4px;
   padding: 10px;
+}
+.chpw-title {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .08em;
+  color: var(--green);
+  margin-bottom: 6px;
 }
 .chpw-note { font-size: 11px; color: var(--text-2); margin-bottom: 8px; }
 .chpw-grid {
@@ -840,8 +958,21 @@ body {
   padding: 6px 8px;
   min-width: 0;
 }
-.chpw-actions { margin-top: 10px; text-align: right; }
-#chpw-status { margin-top: 8px; font-size: 12px; color: #f5a623; min-height: 1em; }
+.chpw-grid label[for="newpw1"], #newpw1 { margin-top: 10px; }
+.chpw-match { grid-column: 2; font-size: 11px; font-family: var(--mono); min-height: 1em; margin-top: -2px; }
+.chpw-match.match { color: var(--green); }
+.chpw-match.nomatch { color: var(--danger); }
+.chpw-strength-bar { margin-top: 8px; height: 12px; display: flex; align-items: center; gap: 8px; pointer-events: none; opacity: 0; transition: opacity .25s; }
+.chpw-vkb-segs { flex: 1; display: flex; gap: 2px; align-items: center; }
+#chpw-strength-lbl { font-size: 10px; font-weight: 600; font-family: var(--mono); white-space: nowrap; flex-shrink: 0; line-height: 1; transition: color .25s; }
+.chpw-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 8px; }
+.chpw-show { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-2); cursor: pointer; }
+.chpw-show input { cursor: pointer; }
+.chpw-actions { text-align: right; }
+#chpw-status { margin-top: 8px; font-size: 12px; color: var(--warn); min-height: 1em; }
+.kdf-slider-wrap { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; flex: 1; min-width: 0; }
+#kdf-slider { width: 100%; max-width: 240px; margin: 0; accent-color: var(--accent); cursor: pointer; }
+.kdf-slider-lbl { font-size: 11px; font-family: var(--mono); color: var(--text-2); white-space: nowrap; }
 .about-chain {
   display: flex;
   align-items: center;
@@ -883,7 +1014,30 @@ body {
 .cr-table .cr-desc { color: var(--text-2); }
 .cr-aead { color: var(--green); font-size: 10px; font-weight: 700; letter-spacing: .04em; }
 .cr-ctr  { color: var(--text-3); font-size: 10px; font-weight: 700; letter-spacing: .04em; }
-.cr-kdf  { color: #f5a623;       font-size: 10px; font-weight: 700; letter-spacing: .04em; }
+.cr-kdf  { color: var(--warn);   font-size: 10px; font-weight: 700; letter-spacing: .04em; }
+
+/* KDF suggested-values chart */
+.kdf-table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 12px; }
+.kdf-table th, .kdf-table td { vertical-align: top; padding: 5px 8px 5px 0; border-top: 1px solid var(--border); text-align: left; }
+.kdf-table thead th { border-top: none; color: var(--text-3); font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; }
+.kdf-table .kdf-class { color: var(--text); white-space: nowrap; }
+.kdf-table .kdf-num { font-family: var(--mono); color: var(--text-2); white-space: nowrap; }
+.kdf-table .kdf-sec-low  { color: var(--text-3); }
+.kdf-table .kdf-sec-mid  { color: var(--green); }
+.kdf-table .kdf-sec-high { color: var(--accent); }
+.kdf-table .kdf-sec-max  { color: var(--warn); }
+#about-kdf { margin-top: 18px; }
+
+.ks-table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 12px; }
+.ks-table td { vertical-align: top; padding: 5px 8px 5px 0; border-top: 1px solid var(--border); }
+.ks-table tr:first-child td { border-top: none; }
+.ks-table .ks-key { white-space: nowrap; width: 1%; padding-right: 12px; }
+.ks-table .ks-desc { color: var(--text-2); }
+kbd {
+  font-family: var(--mono); font-size: 11px; line-height: 1.4; color: var(--text);
+  background: var(--card); border: 1px solid var(--border-2);
+  border-radius: 4px; padding: 1px 6px; box-shadow: 0 1px 0 var(--border-2);
+}
 
 /* ─── Runtime self-test (About modal) ───────────────────── */
 #selftest-banner {
@@ -899,8 +1053,8 @@ body {
   background: var(--card);
   color: var(--text-2);
 }
-#selftest-banner.ok   { border-color: #3fcf8e44; background: rgba(63,207,142,.08); color: var(--green); }
-#selftest-banner.fail { border-color: #ff5c5c44; background: rgba(255,92,92,.08);  color: var(--danger); }
+#selftest-banner.ok   { border-color: rgba(var(--green-rgb),.27);  background: rgba(var(--green-rgb),.08);  color: var(--green); }
+#selftest-banner.fail { border-color: rgba(var(--danger-rgb),.27); background: rgba(var(--danger-rgb),.08); color: var(--danger); }
 .selftest-row {
   display: flex;
   align-items: center;
@@ -922,20 +1076,12 @@ body {
 .selftest-status.fail { color: var(--danger); }
 @keyframes selftest-pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
 .selftest-status.loading { animation: selftest-pulse 1s ease-in-out infinite; }
-.btn-retest {
-  font-size: 11px; font-family: var(--mono); padding: 3px 10px;
-  background: transparent; color: var(--text-2);
-  border: 1px solid var(--border); border-radius: 4px;
-  cursor: pointer; transition: color .15s, border-color .15s;
-}
-.btn-retest:hover { color: var(--accent); border-color: var(--accent); }
-
 /* ─── Cipher-failure warning dialog ─────────────────────── */
 #crypto-warn-overlay {
   display: none;
   position: fixed;
   inset: 0;
-  background: rgba(0,0,0,.8);
+  background: rgba(0,0,0,.6);
   z-index: 3000;
   align-items: center;
   justify-content: center;
@@ -945,7 +1091,7 @@ body {
 #crypto-warn-box {
   background: var(--surface);
   border: 2px solid var(--danger);
-  border-radius: 10px;
+  border-radius: var(--r);
   max-width: 500px;
   width: 100%;
   box-shadow: 0 12px 48px rgba(255,92,92,.3);
@@ -992,6 +1138,87 @@ body {
   transition: color .15s, border-color .15s;
 }
 #crypto-warn-foot button:hover { color: var(--text); border-color: var(--text-2); }
+
+/* ─── Finishing touches ────────────────────────────────────────
+   Cross-cutting polish: text selection, keyboard focus rings, button
+   press feedback, and entrance animations for cards/overlays. Kept at
+   the end so it layers cleanly over the component rules above. */
+
+/* Text selection — tinted to the accent instead of the OS default */
+::selection { background: rgba(77,142,255,.30); color: var(--text); }
+
+/* Keyboard focus rings (pointer clicks stay clean via :focus-visible).
+   One consistent accent halo across every interactive control. */
+.btn:focus-visible,
+.btn-sm:focus-visible,
+.entry-btn:focus-visible,
+.eye-btn:focus-visible,
+.edit-btn:focus-visible,
+.del-btn:focus-visible,
+#about-close:focus-visible,
+.field:focus-visible,
+.otp-col:focus-visible,
+[data-action]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--r);
+}
+.key-wrap:focus-within { box-shadow: 0 0 0 3px rgba(77,142,255,.14); }
+/* Inputs show a visible focus state to match the key-wrap treatment.
+   Bordered inputs get the soft accent ring; borderless inline fields
+   (the new-entry rows and the search box) get an accent underline. */
+.chpw-grid input:focus,
+#customchars:focus,
+.val-cell input[type=number]:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(77,142,255,.14);
+}
+.finput:focus,
+#search-input:focus {
+  outline: none;
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+
+/* Button press feedback — a subtle, springy depress on click */
+.btn:active        { transform: translateY(1px); }
+.btn-sm:active     { transform: translateY(1px); }
+.btn-accent        { box-shadow: 0 1px 2px rgba(0,0,0,.25); }
+.btn-accent:hover  { box-shadow: 0 2px 10px rgba(77,142,255,.35); }
+.btn-accent:active { box-shadow: 0 1px 2px rgba(0,0,0,.25); }
+.btn { transition: background .15s, color .15s, opacity .15s, box-shadow .15s, transform .08s ease; }
+.btn-sm { transition: background .15s, color .15s, transform .08s ease; }
+
+/* Icon buttons get a gentle scale on press */
+.eye-btn:active, .edit-btn:active, .del-btn:active, #about-close:active { transform: scale(.88); }
+.eye-btn, .edit-btn, .del-btn, #about-close { transition: color .15s, background .15s, transform .12s ease; }
+
+/* Entrance animations -------------------------------------------------- */
+@keyframes fade-in   { from { opacity: 0; } to { opacity: 1; } }
+@keyframes pop-in    { from { opacity: 0; transform: translateY(8px) scale(.985); }
+                       to   { opacity: 1; transform: translateY(0)   scale(1);    } }
+@keyframes slide-down{ from { opacity: 0; transform: translateY(-10px); }
+                       to   { opacity: 1; transform: translateY(0);     } }
+
+/* Overlays fade their scrim; the inner box pops in */
+#about-overlay.open, #search-overlay.open, #crypto-warn-overlay.open { animation: fade-in .16s ease-out; }
+#about-overlay.open  #about-box        { animation: pop-in .22s cubic-bezier(.16,.84,.44,1); }
+#search-overlay.open #search-box       { animation: slide-down .18s cubic-bezier(.16,.84,.44,1); }
+#crypto-warn-overlay.open #crypto-warn-box { animation: pop-in .22s cubic-bezier(.16,.84,.44,1); }
+
+/* The new-entry card and generator panel ease in when shown */
+#newentry, #passwordSettings { animation: pop-in .2s cubic-bezier(.16,.84,.44,1); }
+
+/* Honour reduced-motion preferences — disable transforms/animations */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .001ms !important;
+    scroll-behavior: auto !important;
+  }
+  .entry-btn:hover { transform: none; }
+}
 </style>
 </head>
 <body>
@@ -1004,8 +1231,8 @@ body {
       <span class="flbl">Name / URL</span>
       <span id="decname">&nbsp;</span>
     </div>
-    <button class="edit-btn" data-action="edit-entry" aria-label="Edit entry" data-tip="Edit entry">&#x270F;&#xFE0E;</button>
-    <button class="del-btn" data-action="delete-entry" aria-label="Delete entry" data-tip="Delete entry">&#x1F5D1;</button>
+    <button class="edit-btn" data-action="edit-entry" aria-label="Edit entry" data-tip="Edit entry (E)">&#x270F;&#xFE0E;</button>
+    <button class="del-btn" data-action="delete-entry" aria-label="Delete entry" data-tip="Delete entry (Shift+D)">&#x1F5D1;&#xFE0E;</button>
   </div>
 
   <div class="p-row">
@@ -1047,29 +1274,28 @@ body {
 <div id="content">
 
   <!-- Control bar — <form autocomplete="off"> stops Firefox password manager -->
-  <form autocomplete="off" class="ctrl-form"
-        style="display:grid;grid-template-columns:1fr auto auto;gap:6px;align-items:center;margin-bottom:12px;position:relative">
+  <form autocomplete="off" class="ctrl-form">
   <!-- Honeypot: first text field absorbs any extension autofill scan -->
   <input type="text" aria-hidden="true" tabindex="-1" autocomplete="off"
          style="position:absolute;width:0;height:0;opacity:0;pointer-events:none"/>
     <div class="key-wrap">
-      <span class="key-icon">&#x1F511;</span>
+      <span class="key-icon">&#x1F511;&#xFE0E;</span>
       <input type="password" id="aeskey" placeholder="Primary key" aria-label="Primary key"
              autocomplete="off" data-lpignore="true" data-1p-ignore spellcheck="false"/>
-      <button class="eye-btn" data-action="toggle-key" aria-label="Show/hide primary key" data-tip="Show / hide">&#x1F441;</button>
+      <button class="eye-btn" data-action="toggle-key" aria-label="Show/hide primary key" data-tip="Show / hide">&#x1F441;&#xFE0E;</button>
     </div>
-    <button class="btn btn-ghost" data-action="clear-lines" aria-label="Lock and clear" data-tip="Lock and clear all data">&#x2715;</button>
-    <button class="btn btn-accent" data-action="new-entry" data-tip="Add new entry">&#xff0b;&nbsp;New</button>
+    <button class="btn btn-ghost" data-action="clear-lines" aria-label="Lock and clear" data-tip="Lock and clear all data (X)">&#x2715;</button>
+    <button class="btn btn-accent" data-action="new-entry" data-tip="Add new entry (N)">&#xff0b;&nbsp;New</button>
     <div class="key-wrap" style="grid-column:1">
-      <span class="key-icon">&#x1F511;</span>
+      <span class="key-icon">&#x1F511;&#xFE0E;</span>
       <input type="password" id="aeskey2" placeholder="Secondary key" aria-label="Secondary key"
              autocomplete="off" data-lpignore="true" data-1p-ignore spellcheck="false"/>
-      <button class="eye-btn" data-action="toggle-key2" aria-label="Show/hide secondary key" data-tip="Show / hide">&#x1F441;</button>
+      <button class="eye-btn" data-action="toggle-key2" aria-label="Show/hide secondary key" data-tip="Show / hide">&#x1F441;&#xFE0E;</button>
     </div>
     <div style="grid-column:2/4;display:flex;gap:6px">
-      <button class="btn btn-ghost" data-action="clear-display" aria-label="Clear displayed entry" data-tip="Clear displayed entry">C</button>
-      <button class="btn btn-ghost" id="search-btn" data-action="toggle-search" aria-label="Search entries" data-tip="Search entries">&#x1F50D;</button>
-      <button class="btn btn-ghost" id="about-btn" data-action="open-about" aria-label="About and crypto info" data-tip="About &amp; crypto info">&#x2139;&#xFE0E;</button>
+      <button class="btn btn-ghost" data-action="clear-display" aria-label="Clear displayed entry" data-tip="Clear displayed entry (C)">C</button>
+      <button class="btn btn-ghost" id="search-btn" data-action="toggle-search" aria-label="Search entries" data-tip="Search entries (?)">&#x1F50D;&#xFE0E;</button>
+      <button class="btn btn-ghost" id="about-btn" data-action="open-about" aria-label="About and crypto info" data-tip="About &amp; crypto info (A / I)">&#x2139;&#xFE0E;</button>
     </div>
   </form>
   <div id="vault-key-bar">
@@ -1078,6 +1304,8 @@ body {
       <div class="vkb-seg" id="vkb-2"></div>
       <div class="vkb-seg" id="vkb-3"></div>
       <div class="vkb-seg" id="vkb-4"></div>
+      <div class="vkb-seg" id="vkb-5"></div>
+      <div class="vkb-seg" id="vkb-6"></div>
     </div>
     <span id="vault-key-lbl"></span>
   </div>
@@ -1085,6 +1313,7 @@ body {
   <!-- Entry count + integrity badge (same row) -->
   <div id="entry-count-row">
     <div id="vault-integrity" style="display:none"></div>
+    <div id="worker-count" style="display:none"></div>
     <div id="entry-count">-- entries</div>
   </div>
   <div id="reveal-progress" style="display:none"><div id="reveal-progress-fill"></div></div>

@@ -55,11 +55,12 @@ plaintext JSON ──▶ ChaCha20-Poly1305 ──▶ AES-256-GCM ──▶ Twofi
                    (password 1, AEAD)     (password 1, AEAD)  (password 2)        (password 2)
 ```
 
-- Each record carries two random 32-byte salts. From these, **Argon2id** (m = 64 MiB, t = 3, p = 1) derives one master key per password, and **HKDF-SHA-256** expands each into independent per-cipher subkeys — so the expensive memory-hard step runs only twice per record while every layer still gets its own key.
+- Each record carries two random 32-byte salts. From these, **Argon2id** (m = 128 MiB, t = 3, p = 1 by default) derives one master key per password, and **HKDF-SHA-256** expands each into independent per-cipher subkeys — so the expensive memory-hard step runs only twice per record while every layer still gets its own key. The Argon2id cost is **vault-wide and tunable** (see [*Vault tools*](#vault-tools)): it lives in the `kdfparams` file (and is embedded in the page), so changing it re-encrypts the whole vault atomically and the read-only/offline copy still derives keys at the right cost.
+- **Length-hiding padding:** the plaintext is padded up to the next 256-byte boundary (with trailing spaces) before encryption, so the stored ciphertext length reveals only the 256-byte bucket an entry falls in — not the true length of a password or note. The pad is trailing JSON whitespace, discarded automatically on decrypt.
 - The two inner layers are AEAD: a wrong password or a tampered byte produces a hard authentication failure, never garbled output or partial plaintext.
 - The entry **name** is separately double-encrypted (AES-256-GCM under password 1, wrapped by ChaCha20-Poly1305 under password 2), so the database file exposes no plaintext at all.
 - The four ciphers span three unrelated design lineages (ARX stream cipher, AES, and two AES finalists). Breaking one does not weaken the others.
-- Argon2id derivations run on a pool of **Web Workers** (own WASM instance each), so unlocking a large vault stays responsive and peak memory stays bounded.
+- Argon2id derivations run on a pool of **Web Workers** (own WASM instance each), sized at the reported CPU core count (capped at 16 on desktop, 2 on phones/tablets) and further bounded by device memory, so unlocking a large vault stays responsive and peak memory stays bounded. A transient derivation failure is retried (falling back to the main thread) so no entry is silently dropped.
 
 Records live one-per-line in a flat file (`lines`), sorted alphabetically:
 
@@ -102,14 +103,16 @@ Both are required. Enter them once per session; the eye button (👁) toggles vi
 
 Entry buttons are hidden on page load because names are encrypted. When both passwords are entered and you tab or click away from the second field, all names decrypt in parallel (across the Web Worker pool) and the grid reveals in alphabetical order.
 
-A **vault-key strength bar** (four segments) sits below the key fields and shows the combined entropy of both passwords while you type. The estimate uses character-class pool size × length, summed across both keys:
+A **vault-key strength bar** (six segments) sits below the key fields and shows the combined entropy of both passwords while you type. The estimate uses character-class pool size × length, summed across both keys:
 
 | Label | Combined entropy |
 |-------|-----------------|
 | Weak | < 45 bits |
 | Fair | 45 – 79 bits |
 | Strong | 80 – 114 bits |
-| Very Strong | ≥ 115 bits |
+| Very Strong | 115 – 149 bits |
+| Exceptional | 150 – 184 bits |
+| Paranoid | ≥ 185 bits |
 
 While the combined total is below **45 bits**, the **＋ New** button is replaced with **"Too Weak"** and adding entries is blocked — this prevents encrypting new secrets under easily guessable master passwords. The bar is hidden when both fields are empty or after the integrity lock engages (see below).
 
@@ -156,14 +159,16 @@ Click **＋ New** and fill in any combination of:
 
 #### Strength meter
 
-A four-segment bar estimates the typed **entry password**'s entropy from its character classes × length:
+A six-segment bar estimates the typed **entry password**'s entropy from its character classes × length:
 
 | Label | Entropy |
 |-------|---------|
 | Weak | < 40 bits |
 | Fair | 40 – 79 bits |
 | Strong | 80 – 119 bits |
-| Very Strong | ≥ 120 bits |
+| Very Strong | 120 – 159 bits |
+| Exceptional | 160 – 199 bits |
+| Paranoid | ≥ 200 bits |
 
 This bar measures only the entry's stored password field. The separate **vault-key strength bar** above the entry list measures the combined master-password strength — see [*Unlocking*](#unlocking).
 
@@ -173,12 +178,15 @@ Decrypt an entry, then use the ✏ (edit) or 🗑 (delete, with confirmation) bu
 
 ### Vault tools
 
-In the About panel (ℹ), the **Vault Tools** section offers four whole-vault operations:
+In the About panel (ℹ), the **Vault Tools** section offers five whole-vault operations:
 
 - **⬇ Export** — downloads the encrypted database as `vault-export-YYYY-MM-DD.lines`, built entirely in the browser and byte-identical to the server's data file. Ciphertext only, safe to store as an offline backup.
+- **⬆ Import / Restore** — replaces the entire vault from an exported `.lines` file. The file is validated, then **every record is decrypted with the passwords currently in the key fields before anything is sent** — so an import that doesn't match those passwords is refused and nothing changes, and a successful import is guaranteed to be fully readable. Committed as one atomic replace (the server keeps a backup of the previous vault first, so a restore is itself reversible), then re-signed at a fresh revision. Replace-only — it does not merge.
 - **🔎 Audit** — decrypts every entry locally (both passwords required) and reports **reused**, **weak** (< 40 bits), and **empty** passwords. Only entry names are shown, and nothing leaves the device — there are no breach-check API calls by design (the CSP forbids all outbound connections).
 - **🔑 Change Passwords** — rotates both master passwords: every entry is decrypted with the current passwords and re-encrypted under the new ones (fresh salts and nonces) in the browser, then committed to the server as **one atomic replace**. All-or-nothing: if any record fails to decrypt, or the vault changed mid-run from another device, nothing is modified. On success the session switches to the new passwords seamlessly (and the vault is re-signed under them).
 - **✍ Sign** — manually re-signs the **integrity manifest** (see below). Only needed to accept a deliberate manual edit of the data file or a backup restore as the new baseline; normal saves re-sign automatically.
+
+A separate **⚙ Change KDF Parameters** section directly below Vault Tools adjusts the Argon2id work factor (memory and iterations) for the whole vault. The passwords stay the same: every entry is decrypted at the current cost and re-encrypted at the new one, committed via the same all-or-nothing atomic replace as *Change Passwords*, with the new `kdfparams` written atomically alongside the records. Memory is bounded 64 MiB – 1 GiB and iterations 2 – 10 (parallelism fixed at 1); a preset slider and a per-device-class suggestion table help pick a value, and a no-op or out-of-range entry is refused. On success the new cost takes effect immediately, the worker pool re-sizes for the new memory budget, and the vault is re-signed — so a later attempt to downgrade the cost out-of-band is integrity-detectable.
 
 ### Vault integrity manifest
 
@@ -226,7 +234,7 @@ Hover any button or interactive field for a brief description of what it does.
 - **Wrong keys fail hard.** The AEAD layers authenticate the ciphertext — there is no partial or garbled decryption.
 - **The database leaks nothing.** Entries are ciphertext in a flat text file; names are encrypted too. Read access to the file is useless without both master passwords.
 - **The record set is signed on every write.** A keyed HMAC (HMAC-SHA-256, key derived from both master passwords via Argon2id + HKDF) covers the entire sorted record set and is re-stored after every save. Verified on every unlock — tampering, silent deletion, corruption, and rolled-back copies are caught before you act on the data. The server stores the signature opaquely and cannot forge or verify it.
-- **Key derivation is memory-hard.** Argon2id at 64 MiB per guess reduces a GPU farm that tests billions of fast hashes per second to a few thousand guesses per second per card.
+- **Key derivation is memory-hard.** Argon2id at 128 MiB per guess (the default; tunable up to 1 GiB) reduces a GPU farm that tests billions of fast hashes per second to a few thousand guesses per second per card.
 - **Sessions are containable.** Auto-lock, double-Escape lock, clipboard auto-clear, and teardown of the worker pool (whose WASM heaps hold residual key material) all bound how long secrets stay in memory.
 - **Server files are blocked from HTTP access** by the bundled `.htaccess` files — **on Apache only**. nginx ignores `.htaccess` entirely; apply the rules under [*Deploying behind nginx*](#deploying-behind-nginx) or the database file, templates, and backups are downloadable (ciphertext, but block them regardless).
 - **No outbound connections.** The CSP's `connect-src 'self'` means the page can talk only to its own origin — no telemetry, no CDN, no breach-check APIs, no exfiltration channel.
@@ -235,7 +243,7 @@ Hover any button or interactive field for a brief description of what it does.
 
 | Standard | Status | Notes |
 |---|---|---|
-| Argon2 (RFC 9106) | Met | Argon2id key derivation, m = 64 MiB, t = 3, p = 1 (exceeds the RFC 9106 second-recommended option) |
+| Argon2 (RFC 9106) | Met | Argon2id key derivation, m = 128 MiB, t = 3, p = 1 by default (exceeds the RFC 9106 second-recommended option); tunable per vault up to m = 1 GiB, t = 10 |
 | RFC 6238 | Met | TOTP with 30-second window and 6-digit codes |
 | OWASP ASVS L1/L2 | Met | Client-side crypto, CSRF protection, Basic-Auth rate limiting, full security-header suite (CSP, HSTS, COOP/CORP, Permissions-Policy) |
 | OWASP ASVS L3 | Partial | `style-src 'unsafe-inline'` still required by inline `style` attributes; `script-src` is `'self' 'wasm-unsafe-eval'` (latter only to compile the Argon2id WASM). Key derivation is memory-hard Argon2id |
@@ -254,11 +262,12 @@ Hover any button or interactive field for a brief description of what it does.
 | `part1` / `part2` | HTML template fragments; `post.php` splices the entry buttons between them |
 | `lines` | The flat-file ciphertext database, one record per line, sorted |
 | `manifest` | The vault integrity manifest — a client-computed HMAC stored opaquely by the server; absent until the vault is first signed |
+| `kdfparams` | The vault-wide Argon2id cost (`a2id\|memKiB\|t\|p`), written by *Change KDF Parameters* and embedded in the page; absent ⇒ the 128 MiB / t = 3 default |
 | `post.php` | The only server-side code: validates, locks, backs up, writes, and rebuilds the page |
 | `bak/` | Automatic pre-write backups of `lines` (newest 50 kept) |
 | `.htaccess` | Apache-only access rules and security headers |
 
-The server-side write API is deliberately tiny: `data=` (add), `delete_rec=` (delete by content), both together (atomic edit), `bulk=1` (atomic whole-vault replace for password rotation), `sign=1` (store an integrity manifest without touching records), and `regen=1` (rebuild the page without touching data). Everything is validated against the strict v6 record shape before a byte is written.
+The server-side write API is deliberately tiny: `data=` (add), `delete_rec=` (delete by content), both together (atomic edit), `bulk=1` (atomic whole-vault replace for password rotation — optionally carrying a `kdf=` field so the records and the Argon2id cost change together), `restore=1` (atomic whole-vault replace for import — like `bulk` but the entry count may change), `sign=1` (store an integrity manifest without touching records), and `regen=1` (rebuild the page without touching data). Everything is validated against the strict v6 record shape before a byte is written.
 
 ---
 
@@ -278,11 +287,13 @@ correct but protect nothing.)
 
 The rules below assume a `/pass/<instance>/` sub-path layout and cover **every** instance at
 once via `[^/]+`. If you serve a single vault at the site root, drop the `/pass/[^/]+` prefix
-(e.g. `location ~ /(lines|manifest|part1|part2)$`).
+(e.g. `location ~ /(lines|manifest|kdfparams|part1|part2)$`).
 
 ```nginx
-# Block the flat-file DB and HTML templates for every vault instance.
-location ~ /pass/[^/]+/(lines|manifest|part1|part2)$ {
+# Block the flat-file DB, KDF params, manifest, and HTML templates for every
+# vault instance. (kdfparams is not secret — it is also embedded in index.html —
+# but is denied for consistency with the manifest.)
+location ~ /pass/[^/]+/(lines|manifest|kdfparams|part1|part2)$ {
     deny all;
 }
 

@@ -1,4 +1,4 @@
-
+	
 <!-- Part 2 -->
   </div><!-- /entry-grid -->
 
@@ -28,7 +28,7 @@
           <input class="finput" type="text" id="password" aria-label="Entry password" autocomplete="new-password" autocorrect="off" autocapitalize="none"/>
           <div id="pw-gen-btns">
             <button class="btn-sm" data-action="generate" data-tip="Generate a random password">Generate</button>
-            <button class="btn-sm" id="copy-button" data-action="copy-current" disabled data-tip="Copy to clipboard">&#x1F4CB;</button>
+            <button class="btn-sm" id="copy-button" data-action="copy-current" disabled data-tip="Copy to clipboard">&#x1F4CB;&#xFE0E;</button>
           </div>
         </div>
         <div id="pw-strength-wrap" class="pw-strength-wrap" style="display:none">
@@ -37,6 +37,8 @@
             <div class="pw-seg" id="pw-seg-2"></div>
             <div class="pw-seg" id="pw-seg-3"></div>
             <div class="pw-seg" id="pw-seg-4"></div>
+            <div class="pw-seg" id="pw-seg-5"></div>
+            <div class="pw-seg" id="pw-seg-6"></div>
           </div>
           <span class="pw-strength-lbl" id="pw-strength-lbl"></span>
           <span class="pw-entropy-lbl" id="pw-entropy-lbl"></span>
@@ -48,7 +50,7 @@
       <div class="pw-row" style="flex:1;min-width:0">
         <input class="finput" type="text" id="token" placeholder="Base32 TOTP secret" aria-label="2FA TOTP secret"
                autocomplete="off" readonly data-clear-readonly/>
-        <button class="btn-sm" id="btn-scan-qr" data-action="scan-qr" data-tip="Scan a TOTP QR code">&#x1F4F7; Scan QR</button>
+        <button class="btn-sm" id="btn-scan-qr" data-action="scan-qr" data-tip="Scan a TOTP QR code">&#x1F4F7;&#xFE0E; Scan QR</button>
       </div>
     </div>
     <div class="frow" style="align-items:flex-start">
@@ -57,7 +59,7 @@
     </div>
 
     <div class="card-footer">
-      <button class="btn btn-ghost" data-action="show-pw-settings" data-tip="Password generator settings">&#x2699;&#xFE0F; Generator</button>
+      <button class="btn btn-ghost" data-action="show-pw-settings" data-tip="Password generator settings">&#x2699;&#xFE0E; Generator</button>
       <div style="display:flex;gap:8px">
         <button class="btn btn-ghost" data-action="cancel-entry" data-tip="Cancel and discard changes">Cancel</button>
         <button class="btn btn-accent" data-action="save-entry" data-tip="Encrypt and save entry">Save Entry</button>
@@ -138,7 +140,7 @@
 <div id="about-overlay">
   <div id="about-box">
     <div id="about-header">
-      <h2>&#x2139;&#xFE0E;&nbsp; Password Vault</h2>
+      <h2>&#x2139;&#xFE0E;&nbsp; About Password Vault</h2>
       <button id="about-close" data-action="close-about" aria-label="Close">&times;</button>
     </div>
     <div id="about-body">
@@ -151,31 +153,95 @@
 
       <div class="about-section" id="about-vault-tools">
         <h3>Vault Tools</h3>
-        <p><strong>Export</strong> downloads the encrypted database exactly as stored on the server (ciphertext only). <strong>Audit</strong> decrypts every entry locally and flags reused, weak, or empty passwords — names only are shown and nothing leaves this device. <strong>Change Passwords</strong> re-encrypts the whole vault under new master passwords in one atomic save. <strong>Sign</strong> stores a keyed signature (HMAC under your master passwords) over the whole vault; it is checked automatically on every unlock and refreshed after every save, so tampering, corruption, or a rolled-back copy is detected. Use the button only to accept a deliberate manual edit or backup restore as the new baseline.</p>
+        <p><strong>Export</strong> downloads the encrypted database exactly as stored on the server (ciphertext only). <strong>Import</strong> restores an exported <code>.lines</code> file, replacing the whole vault in one atomic save — every imported entry is decrypted with the passwords in the key fields first, so an import that does not match those passwords is refused and nothing is changed (the server also keeps a backup of the current vault before importing). <strong>Audit</strong> decrypts every entry locally and flags reused, weak, or empty passwords — names only are shown and nothing leaves this device. <strong>Change Passwords</strong> re-encrypts the whole vault under new master passwords in one atomic save. <strong>Sign</strong> stores a keyed signature (HMAC under your master passwords) over the whole vault; it is checked automatically on every unlock and refreshed after every save, so tampering, corruption, or a rolled-back copy is detected. Use the button only to accept a deliberate manual edit or backup restore as the new baseline.</p>
         <div class="vt-btns">
           <button class="btn btn-ghost" data-action="export-vault" data-tip="Download the encrypted database">&#x2B07;&#xFE0E; Export</button>
+          <button class="btn btn-ghost" data-action="import-vault" data-tip="Replace the whole vault from an exported .lines file">&#x2B06;&#xFE0E; Import</button>
           <button class="btn btn-ghost" data-action="audit-vault" data-tip="Find reused / weak passwords (local only)">&#x1F50E;&#xFE0E; Audit</button>
           <button class="btn btn-ghost" data-action="toggle-chpw" data-tip="Re-encrypt the vault under new passwords">&#x1F511;&#xFE0E; Change Passwords</button>
           <button class="btn btn-ghost" data-action="resign-vault" data-tip="Sign the current contents as the new integrity baseline">&#x270D;&#xFE0E; Sign</button>
         </div>
         <div id="integrity-status" style="display:none"></div>
         <div id="audit-result" style="display:none"></div>
+        <div id="import-status" style="display:none"></div>
+        <div id="chpw-locked" class="vt-locked-note" style="display:none">Enter both passwords and unlock the vault first.</div>
         <div id="chpw-form" style="display:none">
+          <h4 class="chpw-title">&#x1F511;&#xFE0E; Change Master Passwords</h4>
           <p class="chpw-note">Current passwords are taken from the two key fields above. Every entry is decrypted and re-encrypted in your browser, then saved in a single atomic replace — if anything fails, the vault is left untouched.</p>
           <div class="chpw-grid">
             <label for="newpw1">New password 1</label>
             <input type="password" id="newpw1" autocomplete="new-password"/>
             <label for="newpw1c">Confirm 1</label>
             <input type="password" id="newpw1c" autocomplete="new-password"/>
+            <span id="chpw-match-1" class="chpw-match"></span>
             <label for="newpw2">New password 2</label>
             <input type="password" id="newpw2" autocomplete="new-password"/>
             <label for="newpw2c">Confirm 2</label>
             <input type="password" id="newpw2c" autocomplete="new-password"/>
+            <span id="chpw-match-2" class="chpw-match"></span>
           </div>
-          <div class="chpw-actions">
-            <button class="btn btn-accent" id="btn-chpw-go" data-action="do-chpw" data-tip="Decrypt and re-encrypt every entry">Re-encrypt Vault</button>
+          <div id="chpw-strength-bar" class="chpw-strength-bar">
+            <div class="chpw-vkb-segs">
+              <div class="vkb-seg" id="chpw-vkb-1"></div>
+              <div class="vkb-seg" id="chpw-vkb-2"></div>
+              <div class="vkb-seg" id="chpw-vkb-3"></div>
+              <div class="vkb-seg" id="chpw-vkb-4"></div>
+              <div class="vkb-seg" id="chpw-vkb-5"></div>
+              <div class="vkb-seg" id="chpw-vkb-6"></div>
+            </div>
+            <span id="chpw-strength-lbl"></span>
+          </div>
+          <div class="chpw-foot">
+            <label class="chpw-show"><input type="checkbox" id="chpw-show" data-action="toggle-chpw-show"/> Show passwords</label>
+            <div class="chpw-actions">
+              <button class="btn btn-accent" id="btn-chpw-go" data-action="do-chpw" disabled data-tip="Decrypt and re-encrypt every entry">Re-encrypt Vault</button>
+            </div>
           </div>
           <div id="chpw-status"></div>
+        </div>
+      </div>
+
+      <div class="about-section" id="about-kdf">
+        <h3>&#x2699;&#xFE0E; Change KDF Parameters</h3>
+        <p>Tunes the Argon2id key-derivation cost for the <strong>whole vault</strong>. Higher values make every unlock slower for you but brute-forcing far slower for an attacker. The change re-encrypts every entry in your browser under the same passwords (taken from the key fields above), then saves in a single atomic replace — if anything fails, the vault is left untouched. Memory must be 64&ndash;1024 MiB, iterations 2&ndash;10; parallelism is fixed at 1.</p>
+
+        <div class="vt-btns">
+          <button class="btn btn-ghost" data-action="toggle-kdf" data-tip="Re-encrypt the vault at a new Argon2id cost">&#x2699;&#xFE0E; Change KDF Parameters</button>
+        </div>
+        <div id="kdf-locked" class="vt-locked-note" style="display:none">Enter both passwords and unlock the vault first.</div>
+        <div id="kdf-form" style="display:none;margin-top:10px">
+
+          <p>Suggested settings by device class (the security column is a rough guide to how much memory-hardness an offline attacker faces):</p>
+          <table class="kdf-table">
+            <thead>
+              <tr><th>Device class</th><th>Memory</th><th>Iter.</th><th>Security</th></tr>
+            </thead>
+            <tbody>
+              <tr><td class="kdf-class">Small portable (phone / low-RAM)</td><td class="kdf-num">64 MiB</td><td class="kdf-num">3</td><td class="kdf-sec-low">Baseline</td></tr>
+              <tr><td class="kdf-class">Laptop / typical desktop</td><td class="kdf-num">128 MiB</td><td class="kdf-num">3</td><td class="kdf-sec-mid">Good (default)</td></tr>
+              <tr><td class="kdf-class">Modern desktop (16 GB+)</td><td class="kdf-num">256 MiB</td><td class="kdf-num">4</td><td class="kdf-sec-high">Strong</td></tr>
+              <tr><td class="kdf-class">Large workstation (32 GB+)</td><td class="kdf-num">512 MiB</td><td class="kdf-num">4</td><td class="kdf-sec-max">Very strong</td></tr>
+              <tr><td class="kdf-class">Workstation, max</td><td class="kdf-num">1024 MiB</td><td class="kdf-num">5</td><td class="kdf-sec-max">Maximum</td></tr>
+            </tbody>
+          </table>
+          <p class="chpw-note">A high memory setting multiplied by the parallel worker count must fit in this device's RAM — raise it gradually if unlocking starts to fail on low-memory devices.</p>
+
+          <div class="chpw-grid">
+            <label for="kdf-mem">Memory (MiB)</label>
+            <input type="number" id="kdf-mem" min="64" max="1024" step="64" autocomplete="off"/>
+            <label for="kdf-time">Iterations</label>
+            <input type="number" id="kdf-time" min="2" max="10" step="1" autocomplete="off"/>
+          </div>
+          <div class="chpw-foot">
+            <div class="kdf-slider-wrap">
+              <input type="range" id="kdf-slider" min="1" max="5" step="1" value="2" autocomplete="off" data-tip="Pick a preset from the table above"/>
+              <span id="kdf-slider-lbl" class="kdf-slider-lbl"></span>
+            </div>
+            <div class="chpw-actions">
+              <button class="btn btn-accent" id="btn-kdf-go" data-action="do-kdf" data-tip="Decrypt and re-encrypt every entry at the new cost">Re-encrypt Vault</button>
+            </div>
+          </div>
+          <div id="kdf-status"></div>
         </div>
       </div>
 
@@ -207,10 +273,26 @@
           <span class="selftest-label">Argon2id (WASM)</span>
           <span class="selftest-status loading" id="st-argon2">&#x2026;</span>
         </div>
-        <div style="margin-top:10px;text-align:right">
-          <button class="btn-retest" data-action="retest-crypto">&#x21bb; Retest</button>
+        <div style="margin-top:10px;text-align:left">
+          <button class="btn btn-ghost" data-action="retest-crypto">&#x21bb; Retest</button>
         </div>
       </div>
+      
+      <div class="about-section" id="about-shortcuts">
+        <h3>Keyboard Shortcuts</h3>
+        <p>Single-key shortcuts work whenever you are not typing in a field.</p>
+        <table class="ks-table">
+          <tr><td class="ks-key"><kbd>?</kbd></td><td class="ks-desc">Open / close search</td></tr>
+          <tr><td class="ks-key"><kbd>N</kbd></td><td class="ks-desc">New entry (when the &#xff0b; New button is enabled)</td></tr>
+          <tr><td class="ks-key"><kbd>E</kbd></td><td class="ks-desc">Edit the selected entry (when one is displayed)</td></tr>
+          <tr><td class="ks-key"><kbd>Shift</kbd> <kbd>D</kbd></td><td class="ks-desc">Delete the selected entry, with confirmation (when one is displayed)</td></tr>
+          <tr><td class="ks-key"><kbd>C</kbd></td><td class="ks-desc">Clear the displayed entry</td></tr>
+          <tr><td class="ks-key"><kbd>A</kbd> / <kbd>I</kbd></td><td class="ks-desc">Open this About panel</td></tr>
+          <tr><td class="ks-key"><kbd>X</kbd></td><td class="ks-desc">Lock the vault</td></tr>
+          <tr><td class="ks-key"><kbd>Esc</kbd></td><td class="ks-desc">Close dialog / clear displayed entry</td></tr>
+          <tr><td class="ks-key"><kbd>Esc</kbd> <kbd>Esc</kbd></td><td class="ks-desc">Lock the vault (press twice quickly)</td></tr>
+        </table>
+      </div>      
 
       <div class="about-section" id="about-vault-signing">
         <h3>Vault Signing</h3>
@@ -237,14 +319,16 @@
 
       <div class="about-section">
         <h3>Key Derivation</h3>
-        <p>Each record derives <strong>two 256-bit master keys</strong> with memory-hard <code>Argon2id</code> (<strong>m&nbsp;=&nbsp;64&nbsp;MiB, t&nbsp;=&nbsp;3, p&nbsp;=&nbsp;1</strong>) &mdash; one per master password, each over a <strong>32-byte random salt</strong> generated fresh for every save. <code>HKDF-SHA-256</code> then expands each master key into the independent per-cipher subkeys (distinct <code>info</code> labels), so the expensive memory-hard step runs only <strong>twice per record</strong> while every layer still gets its own key.</p>
-        <p style="margin-top:6px">Revealing many entry names at once would otherwise serialise the memory-hard hashes on the main thread (the WASM runs synchronously behind an internal mutex). To keep the UI responsive, each derivation is dispatched to a pool of dedicated <strong>Web Workers</strong> &mdash; one WebAssembly instance each, up to <strong>4 in parallel</strong> &mdash; so peak memory stays bounded at pool&nbsp;&times;&nbsp;64&nbsp;MiB. The pool is created lazily and torn down on every lock, reclaiming its WASM heaps and dropping residual password bytes. If Workers are unavailable, derivation falls back to the main thread.</p>
+        <p>Each record derives <strong>two 256-bit master keys</strong> with memory-hard <code>Argon2id</code> (<strong>m&nbsp;=&nbsp;128&nbsp;MiB, t&nbsp;=&nbsp;3, p&nbsp;=&nbsp;1</strong>) &mdash; one per master password, each over a <strong>32-byte random salt</strong> generated fresh for every save. <code>HKDF-SHA-256</code> then expands each master key into the independent per-cipher subkeys (distinct <code>info</code> labels), so the expensive memory-hard step runs only <strong>twice per record</strong> while every layer still gets its own key.</p>
+        <p style="margin-top:6px">Revealing many entry names at once would otherwise serialise the memory-hard hashes on the main thread (the WASM runs synchronously behind an internal mutex). To keep the UI responsive, each derivation is dispatched to a pool of dedicated <strong>Web Workers</strong> &mdash; one WebAssembly instance each &mdash; so peak memory stays bounded at pool&nbsp;&times;&nbsp;128&nbsp;MiB. The pool is sized at the <strong>reported CPU core count</strong> &mdash; capped at <strong>16</strong> on desktop and <strong>2</strong> on phones/tablets (less RAM, thermal throttling) &mdash; and further bounded by available device memory so the 128&nbsp;MiB heaps stay within roughly half of RAM. It is created lazily and torn down on every lock, reclaiming its WASM heaps and dropping residual password bytes. A derivation that fails transiently (memory pressure, a worker crash) is <strong>retried</strong> &mdash; falling back to the main thread between attempts &mdash; so an entry is never silently dropped from the grid; if Workers are unavailable entirely, derivation runs on the main thread.</p>
       </div>
 
       <div class="about-section">
         <h3>Encryption Pipeline</h3>
         <div class="about-chain">
           <span class="about-chip">Plaintext&nbsp;JSON</span>
+          <span>&#x2192;</span>
+          <span class="about-chip">Pad&nbsp;to&nbsp;256&nbsp;B</span>
           <span>&#x2192;</span>
           <span class="about-chip">ChaCha20-Poly1305</span>
           <span>&#x2192;</span>
@@ -273,6 +357,7 @@
           <span><code>Serpent-256-CTR</code> &mdash; password&nbsp;2, 16-byte nonce (unauthenticated; relies on inner AEAD layers for integrity)</span>
         </div>
         <p style="margin-top:6px">The two inner AEAD layers authenticate the ciphertext. A wrong password or tampered data causes immediate authentication failure before any plaintext is revealed.</p>
+        <p style="margin-top:6px"><strong>Length-hiding padding.</strong> Before the first layer, the plaintext JSON is padded up to the next <strong>256-byte</strong> boundary with trailing spaces. The stored ciphertext length therefore reveals only which 256-byte bucket an entry falls into &mdash; not the true length of a password or note &mdash; so someone who obtains the raw database cannot tell a short password from a long one. The padding is valid trailing JSON whitespace, so it is discarded automatically on decrypt with no separate un-pad step.</p>
       </div>
 
       <div class="about-section">
@@ -306,8 +391,8 @@
             <td class="cr-desc">AES finalist that came <strong>second</strong> in the panel vote, designed by Ross Anderson, Eli Biham, and Lars Knudsen. Chosen by the designers specifically for its conservative security margin: 32 rounds (vs AES&rsquo;s 14), with a simple bitslice structure that has resisted cryptanalysis for over 25 years. The outermost layer &mdash; any weakness in layers 1&ndash;3 is still protected here.</td>
           </tr>
         </table>
-        <p style="margin-top:10px"><strong>Argon2id &mdash; making brute-force infeasible.</strong> Before any cipher sees a key, each password is passed through Argon2id (PHC winner, 2015) with <strong>64&nbsp;MiB of RAM and 3 passes</strong>. This means every single password guess an attacker makes requires 64&nbsp;MiB of memory and significant CPU time. A GPU farm that can test billions of bcrypt hashes per second is reduced to a few thousand Argon2id guesses per second per card. Combined with a strong, unique second password, this raises the cost of an offline brute-force attack to be computationally prohibitive.</p>
-        <p style="margin-top:6px">The overall result: even if an attacker obtains the raw ciphertext file, they face four independent cipher layers with independent HKDF-derived keys, two independent AEAD authentication checks, and a memory-hard KDF that serialises every guess into a 64&nbsp;MiB, multi-pass operation &mdash; all of which must be overcome before a single password is revealed.</p>
+        <p style="margin-top:10px"><strong>Argon2id &mdash; making brute-force infeasible.</strong> Before any cipher sees a key, each password is passed through Argon2id (PHC winner, 2015) with <strong>128&nbsp;MiB of RAM and 3 passes</strong>. This means every single password guess an attacker makes requires 128&nbsp;MiB of memory and significant CPU time. A GPU farm that can test billions of bcrypt hashes per second is reduced to a few thousand Argon2id guesses per second per card. Combined with a strong, unique second password, this raises the cost of an offline brute-force attack to be computationally prohibitive.</p>
+        <p style="margin-top:6px">The overall result: even if an attacker obtains the raw ciphertext file, they face four independent cipher layers with independent HKDF-derived keys, two independent AEAD authentication checks, and a memory-hard KDF that serialises every guess into a 128&nbsp;MiB, multi-pass operation &mdash; all of which must be overcome before a single password is revealed.</p>
       </div>
 
       <div class="about-section">
@@ -319,12 +404,14 @@
 
       <div class="about-section">
         <h3>Password Strength</h3>
-        <p>While typing a password in the new-entry form, a four-segment bar and label estimate strength from the character classes present (lowercase, uppercase, digits, symbols) and the password length. Entropy is reported in bits.</p>
+        <p>While typing a password in the new-entry form, a six-segment bar and label estimate strength from the character classes present (lowercase, uppercase, digits, symbols) and the password length. Entropy is reported in bits.</p>
         <table style="width:100%;margin-top:6px;border-collapse:collapse;font-size:12px">
           <tr><td style="color:#ff5c5c;font-family:var(--mono);padding:1px 8px 1px 0">Weak</td><td style="color:var(--text-2)">&lt; 40 bits</td></tr>
           <tr><td style="color:#f5a623;font-family:var(--mono);padding:1px 8px 1px 0">Fair</td><td style="color:var(--text-2)">40 – 79 bits</td></tr>
           <tr><td style="color:#3fcf8e;font-family:var(--mono);padding:1px 8px 1px 0">Strong</td><td style="color:var(--text-2)">80 – 119 bits</td></tr>
-          <tr><td style="color:#4d8eff;font-family:var(--mono);padding:1px 8px 1px 0">Very Strong</td><td style="color:var(--text-2)">&ge; 120 bits</td></tr>
+          <tr><td style="color:#4d8eff;font-family:var(--mono);padding:1px 8px 1px 0">Very Strong</td><td style="color:var(--text-2)">120 – 159 bits</td></tr>
+          <tr><td style="color:#a878ff;font-family:var(--mono);padding:1px 8px 1px 0">Exceptional</td><td style="color:var(--text-2)">160 – 199 bits</td></tr>
+          <tr><td style="color:#ff5cc8;font-family:var(--mono);padding:1px 8px 1px 0">Paranoid</td><td style="color:var(--text-2)">&ge; 200 bits</td></tr>
         </table>
       </div>
 
@@ -375,7 +462,7 @@
         <div class="standards-grid">
           <span class="sg-name">Argon2 (RFC 9106)</span>
           <span class="sg-met">Met</span>
-          <span class="sg-desc">Argon2id key derivation &mdash; m&nbsp;=&nbsp;64&nbsp;MiB, t&nbsp;=&nbsp;3, p&nbsp;=&nbsp;1 (exceeds the RFC&nbsp;9106 second-recommended option), then HKDF-SHA-256 subkeys</span>
+          <span class="sg-desc">Argon2id key derivation &mdash; m&nbsp;=&nbsp;128&nbsp;MiB, t&nbsp;=&nbsp;3, p&nbsp;=&nbsp;1 (exceeds the RFC&nbsp;9106 second-recommended option), then HKDF-SHA-256 subkeys</span>
 
           <span class="sg-name">RFC 6238</span>
           <span class="sg-met">Met</span>

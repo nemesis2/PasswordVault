@@ -1682,6 +1682,48 @@ var _v5Names = new Map();
 var _revealGen     = 0;
 var _lastRevealPw  = null;
 var _lastRevealPw2 = null;
+// True while a reveal-all (name decryption) pass is running. Used to (a) show the
+// live worker count beside the entry/integrity line and (b) let a refocus / input
+// edit abort the in-flight decode.
+var _revealActive  = false;
+
+// Show / refresh / hide the live Argon2id worker count in the entry-count row.
+// Only meaningful while decoding (the element is hidden otherwise). Counts busy
+// pool workers; with the main-thread fallback (no pool) it shows "main thread".
+function _showWorkerCount() {
+    var el = document.getElementById('worker-count');
+    if (el) { el.style.display = ''; _updateWorkerCount(); }
+}
+function _hideWorkerCount() {
+    var el = document.getElementById('worker-count');
+    if (el) { el.style.display = 'none'; el.textContent = ''; }
+}
+function _updateWorkerCount() {
+    var el = document.getElementById('worker-count');
+    if (!el || el.style.display === 'none') return;
+    if (!_argonPool) {
+        // Pool is created lazily on the first derivation; until then show a
+        // neutral label (or note the main-thread fallback if workers are off).
+        el.textContent = _argonWorkersOK ? 'decoding…' : 'main thread';
+        return;
+    }
+    var busy = 0;
+    for (var i = 0; i < _argonPool.length; i++) if (_argonPool[i].busy) busy++;
+    el.textContent = busy + (busy === 1 ? ' worker' : ' workers');
+}
+
+// Stop an in-flight reveal-all decode: supersede the running loop (gen bump) and
+// tear down its progress UI. Already-revealed buttons stay revealed; remaining
+// locked entries stay locked. _lastRevealPw* are left untouched (they are only
+// set on a *completed* pass), so a later blur with the same passwords re-runs.
+function _abortReveal() {
+    if (!_revealActive) return;
+    _revealGen++;
+    _revealActive = false;
+    var bar = document.getElementById('reveal-progress');
+    if (bar) bar.style.display = 'none';
+    _hideWorkerCount();
+}
 
 // Max v6 name decryptions in flight during reveal-all. Each issues two Argon2id
 // derivations, which now run on the Web Worker pool (see _argonDerive) rather
@@ -1702,17 +1744,26 @@ function _revealConcurrency() {
 // Byte / hex utilities
 // ============================================================
 
+// Reused, stateless encoder/decoder singletons — avoids re-allocating one per
+// call across the per-record crypto paths.
+var _TE = new TextEncoder();
+var _TD = new TextDecoder();
+
+// Precomputed byte→hex-pair table ('00'..'ff') for fast bytesToHex.
+var _HEX = [];
+for (var _h = 0; _h < 256; _h++) _HEX[_h] = (_h + 256).toString(16).slice(1);
+
 function bytesToHex(bytes) {
-    return Array.from(bytes).map(function(b) {
-        return b.toString(16).padStart(2, '0');
-    }).join('');
+    var out = '';
+    for (var i = 0; i < bytes.length; i++) out += _HEX[bytes[i]];
+    return out;
 }
 
 function hexToBytes(hex) {
     if (hex.length % 2 !== 0) throw new Error('Odd-length hex string');
     var bytes = new Uint8Array(hex.length / 2);
     for (var i = 0; i < bytes.length; i++) {
-        bytes[i] = parseInt(hex.substr(i * 2, 2), 16);
+        bytes[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
     }
     return bytes;
 }
@@ -1727,15 +1778,70 @@ function hexToBytes(hex) {
 // This keeps the cascade's keys independent while running the expensive
 // memory-hard step only twice per record instead of once per cipher.
 //
-// Argon2id parameters are hardcoded (like the old PBKDF2 iteration count): a
-// record stores nothing about them, so changing them invalidates every record
-// and must be paired with re-encrypting `lines` via the offline migration tool.
+// Argon2id parameters (memory `m` and iterations `t`) are vault-wide and
+// user-tunable from Vault Tools → Change KDF Parameters. They are NOT stored per
+// record; instead the active params are persisted server-side (`kdfparams`) and
+// embedded in index.html (`#vault-kdf`), and read at load into `_vaultKdf`. This
+// keeps the read-only/offline copy (index.html + javascript.js, no server) able
+// to derive keys. Changing them re-encrypts the whole vault (same flow as a
+// master-password change). The DEFAULT_* values below are the fallback when no
+// params are embedded (a vault that has never set them) and the historical
+// hardcoded cost. Parallelism (p) and hash length stay fixed.
 // ============================================================
 
-var ARGON2_TIME    = 3;       // t — iterations
-var ARGON2_MEM_KIB = 65536;   // m — 64 MiB
-var ARGON2_PAR     = 1;       // p — lanes
-var ARGON2_HASHLEN = 32;      // 256-bit master key
+var DEFAULT_ARGON2_TIME    = 3;       // t — iterations
+var DEFAULT_ARGON2_MEM_KIB = 131072;  // m — 128 MiB
+var ARGON2_PAR             = 1;       // p — lanes (fixed, not user-tunable)
+var ARGON2_HASHLEN         = 32;      // 256-bit master key
+
+// KDF cost bounds — mirrored by is_valid_kdf() in post.php. A user (or a forged
+// write) cannot drop below the floor or above the ceiling.
+var KDF_MEM_MIN_KIB  = 65536;    // 64 MiB
+var KDF_MEM_MAX_KIB  = 1048576;  // 1 GiB
+var KDF_TIME_MIN     = 2;
+var KDF_TIME_MAX     = 10;
+
+// Active vault-wide Argon2id cost. Initialised from the embedded #vault-kdf span
+// at load (see _initVaultKdf), defaulting to the historical hardcoded values.
+var _vaultKdf = { iterations: DEFAULT_ARGON2_TIME, memorySize: DEFAULT_ARGON2_MEM_KIB,
+                  parallelism: ARGON2_PAR, hashLength: ARGON2_HASHLEN };
+
+// Parse an "a2id|m|t|p" params string into a kdf object, or null if malformed /
+// out of bounds. Mirrors post.php's is_valid_kdf().
+function _parseKdf(s) {
+    if (typeof s !== 'string') return null;
+    var p = s.split('|');
+    if (p.length !== 4 || p[0] !== 'a2id') return null;
+    if (!/^\d{1,10}$/.test(p[1]) || !/^\d{1,10}$/.test(p[2]) || !/^\d{1,10}$/.test(p[3])) return null;
+    var m = parseInt(p[1], 10), t = parseInt(p[2], 10), pp = parseInt(p[3], 10);
+    if (m < KDF_MEM_MIN_KIB || m > KDF_MEM_MAX_KIB) return null;
+    if (t < KDF_TIME_MIN || t > KDF_TIME_MAX) return null;
+    if (pp !== 1) return null;
+    return { iterations: t, memorySize: m, parallelism: pp, hashLength: ARGON2_HASHLEN };
+}
+
+// Serialise a kdf object back to the "a2id|m|t|p" wire/storage form.
+function _kdfToString(kdf) {
+    return 'a2id|' + kdf.memorySize + '|' + kdf.iterations + '|' + kdf.parallelism;
+}
+
+// Read the active vault params from the embedded #vault-kdf span. Called once at
+// load; the read path never fetches `kdfparams` over HTTP (offline portability).
+function _initVaultKdf() {
+    var el = document.getElementById('vault-kdf');
+    var parsed = el ? _parseKdf(el.getAttribute('data-kdf') || '') : null;
+    if (parsed) _vaultKdf = parsed;
+}
+
+// Length-hiding padding. The payload plaintext (the JSON of all entry fields) is
+// padded up to a multiple of PAYLOAD_PAD_BUCKET bytes before encryption so the
+// stored ciphertext length no longer reveals the plaintext length (e.g. how long
+// a password or note is) to anyone who obtains `lines`. Padding is ASCII spaces
+// (0x20) appended after the JSON value — valid trailing JSON whitespace, so
+// JSON.parse on decode ignores it and NO un-pad step is needed. This also makes
+// the change backward-compatible: existing unpadded records still decode, and
+// re-encrypting them (Vault Tools → Re-encrypt) brings them up to the new scheme.
+var PAYLOAD_PAD_BUCKET = 256; // bytes
 
 // HKDF info labels — distinct per derived subkey so they are cryptographically
 // independent despite sharing a master key.
@@ -1754,28 +1860,60 @@ var _HK = {
 // hash-wasm runs Argon2id synchronously on a single WASM instance behind an
 // internal mutex, so awaiting many derivations on the main thread serialises
 // them onto one core AND blocks the UI. To get real parallelism — reveal-all
-// needs two 64 MiB derivations per entry — each derivation is dispatched to a
+// needs two 128 MiB derivations per entry — each derivation is dispatched to a
 // pool of dedicated Web Workers (served as `argon2-worker.js`), each with its
 // own WASM instance. The pool is created lazily on first use and torn down on
 // lock so its WASM memory (which can only grow, never shrink) is reclaimed.
 //
-// Peak memory ≈ poolSize × 64 MiB (only while hashing), so the pool is capped.
+// Peak memory ≈ poolSize × 128 MiB (only while hashing), so the pool is capped.
 // If Workers are unavailable (CSP blocks them, ancient browser, or the ctor
 // throws) we fall back to the in-process argon2idHash so the app still works —
 // inputs are never transferred, so a worker failure can retry on the main
 // thread without losing the password/salt buffers.
 // ============================================================
 
-var _ARGON_POOL_MAX = 4;          // hard cap (memory = poolSize × 64 MiB)
+var _ARGON_POOL_MAX = 16;         // hard cap on worker count (CPU-bound ceiling)
+var _ARGON_POOL_MAX_MOBILE = 2;   // tighter cap on phones/tablets (limited RAM + thermals)
 var _argonPool      = null;       // [{ worker, busy }] once initialised
 var _argonQueue     = [];         // pending { password, salt, opts, resolve, reject }
 var _argonJobSeq    = 0;
 var _argonJobs      = new Map();   // job id → { resolve, reject, slot }
 var _argonWorkersOK = true;        // flips false permanently if Workers can't be used
+var _ARGON_RETRIES  = 2;          // transient-failure retries before giving up
+
+// Pool size scales with CPU cores (all reported cores, hard max _ARGON_POOL_MAX)
+// BUT is also bounded by a memory budget: each busy worker holds its own ~128 MiB
+// Argon2id WASM heap, so peak memory ≈ poolSize × 128 MiB. Spinning up too many
+// workers on a many-core / low-RAM device exhausts memory, and a failed
+// derivation surfaces as a *swallowed* "wrong key" in reveal-all (variable entry
+// counts across runs with the same password). All reported cores are used (the
+// browser often under-reports on this box); navigator.deviceMemory (GiB, spec-capped at 8) further
+// caps workers so the heaps stay within ~half of device memory.
+// Mobile detection — phones/tablets have far less RAM and aggressive thermal
+// throttling, so they get a tighter worker cap (_ARGON_POOL_MAX_MOBILE). Prefer
+// the UA-Client-Hints `mobile` boolean (Chromium); fall back to a UA-string regex
+// (Safari/Firefox, which don't expose userAgentData).
+function _isMobileDevice() {
+    if (typeof navigator === 'undefined') return false;
+    if (navigator.userAgentData && typeof navigator.userAgentData.mobile === 'boolean') {
+        return navigator.userAgentData.mobile;
+    }
+    var ua = navigator.userAgent || '';
+    return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini|Mobile|Tablet/i.test(ua);
+}
 
 function _argonPoolSize() {
     var hc = (typeof navigator !== 'undefined' && navigator.hardwareConcurrency) || 2;
-    return Math.max(1, Math.min(hc, _ARGON_POOL_MAX));
+    var cap = _isMobileDevice() ? _ARGON_POOL_MAX_MOBILE : _ARGON_POOL_MAX;
+    var byCores = Math.max(1, Math.min(hc, cap));
+    var devGiB  = (typeof navigator !== 'undefined' && navigator.deviceMemory) || 0;
+    if (!devGiB) return byCores;                       // unknown → trust the core count
+    var budgetMiB = devGiB * 1024 * 0.5;               // use at most ~half of RAM
+    // Divide by the actual per-worker heap (the active vault memory cost) so the
+    // budget tracks the parameter — never a hardcoded MiB value. A larger `m`
+    // (user-raised cost) automatically shrinks the pool to stay within RAM.
+    var byMem     = Math.max(1, Math.floor(budgetMiB / (_vaultKdf.memorySize / 1024)));
+    return Math.min(byCores, byMem);
 }
 
 function _initArgonPool() {
@@ -1821,6 +1959,7 @@ function _onArgonWorkerMessage(e) {
     if (d.error) job.reject(new Error(d.error));
     else         job.resolve(d.hash);   // Uint8Array, buffer transferred to us
     _drainArgonQueue();
+    _updateWorkerCount();
 }
 
 function _onArgonWorkerError(e) {
@@ -1840,6 +1979,7 @@ function _drainArgonQueue() {
         _argonJobs.set(id, { resolve: job.resolve, reject: job.reject, slot: slot });
         slot.worker.postMessage({ id: id, password: job.password, salt: job.salt, opts: job.opts });
     }
+    _updateWorkerCount();
 }
 
 function _argonDispatch(passwordBytes, saltBytes, opts) {
@@ -1851,26 +1991,54 @@ function _argonDispatch(passwordBytes, saltBytes, opts) {
 
 // Run one Argon2id derivation, preferring the worker pool and falling back to
 // the in-process implementation if workers are unavailable or error out.
+//
+// Argon2id is deterministic and never throws on a *wrong* password (it just
+// produces a different hash — the mismatch surfaces later as an AEAD failure),
+// so any throw here is a transient/environment failure (memory pressure, a
+// worker crash). We retry up to _ARGON_RETRIES times: each attempt tries the
+// worker pool, then the mutex-serialized main-thread path (which only ever holds
+// one 128 MiB heap at a time — the safe path under memory pressure), yielding
+// with a short backoff between attempts so busy workers can free their heaps.
+// This stops a transient failure from being swallowed as "wrong key" in
+// reveal-all, which would silently drop entries from the grid.
 async function _argonDerive(passwordBytes, saltBytes, opts) {
-    _initArgonPool();
-    if (_argonWorkersOK && _argonPool) {
+    var lastErr;
+    for (var attempt = 0; attempt <= _ARGON_RETRIES; attempt++) {
+        _initArgonPool();
+        if (_argonWorkersOK && _argonPool) {
+            try {
+                return await _argonDispatch(passwordBytes, saltBytes, opts);
+            } catch (e) {
+                lastErr = e;   // Worker path failed — degrade to the main thread.
+            }
+        }
         try {
-            return await _argonDispatch(passwordBytes, saltBytes, opts);
+            return await argon2idHash(passwordBytes, saltBytes, opts);
         } catch (e) {
-            // Worker path failed for this call — degrade to the main thread.
+            lastErr = e;
+            if (attempt < _ARGON_RETRIES) {
+                var backoff = 50 * (attempt + 1);
+                await new Promise(function (r) { setTimeout(r, backoff); });
+            }
         }
     }
-    return argon2idHash(passwordBytes, saltBytes, opts);
+    throw lastErr;
 }
 
-// Argon2id master key for (password, salt). Cached so it runs only once per pair.
-async function deriveMasterKey(password, saltBytes) {
-    var cacheKey = password + ':' + bytesToHex(saltBytes);
+// Argon2id master key for (password, salt) at a given cost. Cached so it runs
+// only once per (password, salt, cost) tuple. `kdf` defaults to the active
+// vault-wide params; the whole-vault re-encode passes the OLD params to decrypt
+// and the NEW params to encrypt, so the cost MUST be part of the cache key (else
+// an old-cost key would be reused for a new-cost derivation, or vice versa).
+async function deriveMasterKey(password, saltBytes, kdf) {
+    if (!kdf) kdf = _vaultKdf;
+    var cacheKey = password + ':' + bytesToHex(saltBytes)
+                 + ':' + kdf.memorySize + ':' + kdf.iterations + ':' + kdf.parallelism;
     if (_mkCache.has(cacheKey)) return _mkCache.get(cacheKey);
     var mk = await _argonDerive(
-        new TextEncoder().encode(password),
+        _TE.encode(password),
         saltBytes,
-        { iterations: ARGON2_TIME, memorySize: ARGON2_MEM_KIB, parallelism: ARGON2_PAR, hashLength: ARGON2_HASHLEN }
+        { iterations: kdf.iterations, memorySize: kdf.memorySize, parallelism: kdf.parallelism, hashLength: kdf.hashLength }
     );
     _mkCache.set(cacheKey, mk);
     return mk;
@@ -1881,7 +2049,7 @@ async function deriveMasterKey(password, saltBytes) {
 async function hkdfBytes(masterKeyBytes, infoLabel) {
     var base = await crypto.subtle.importKey('raw', masterKeyBytes, 'HKDF', false, ['deriveBits']);
     var bits = await crypto.subtle.deriveBits(
-        { name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(0), info: new TextEncoder().encode(infoLabel) },
+        { name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(0), info: _TE.encode(infoLabel) },
         base, 256
     );
     return new Uint8Array(bits);
@@ -1891,7 +2059,7 @@ async function hkdfBytes(masterKeyBytes, infoLabel) {
 async function hkdfAesKey(masterKeyBytes, infoLabel) {
     var base = await crypto.subtle.importKey('raw', masterKeyBytes, 'HKDF', false, ['deriveKey']);
     return crypto.subtle.deriveKey(
-        { name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(0), info: new TextEncoder().encode(infoLabel) },
+        { name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(0), info: _TE.encode(infoLabel) },
         base, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']
     );
 }
@@ -1906,12 +2074,26 @@ async function hkdfAesKey(masterKeyBytes, infoLabel) {
 
 // Encrypt the payload under the record's two master keys (derived from the
 // shared record salts). Returns { iv1Hex, nonce2Hex, nonce3Hex, nonce4Hex, encHex }.
-async function encryptFields(password, password2, recSalt1, recSalt2, fields) {
+// Pad the encoded plaintext up to the next PAYLOAD_PAD_BUCKET multiple with
+// trailing ASCII spaces (with a one-bucket floor so tiny entries don't reveal
+// they're tiny). Spaces are valid trailing JSON whitespace, so the decode path
+// (JSON.parse) needs no change. Padding the byte length (not the string length)
+// keeps multibyte UTF-8 entries bucketed correctly.
+function _padPlaintext(bytes) {
+    var target = Math.max(PAYLOAD_PAD_BUCKET,
+                          Math.ceil(bytes.length / PAYLOAD_PAD_BUCKET) * PAYLOAD_PAD_BUCKET);
+    var out = new Uint8Array(target);
+    out.set(bytes);
+    out.fill(0x20, bytes.length);
+    return out;
+}
+
+async function encryptFields(password, password2, recSalt1, recSalt2, fields, kdf) {
     var iv1    = crypto.getRandomValues(new Uint8Array(12));  // AES-GCM
     var nonce2 = crypto.getRandomValues(new Uint8Array(12));  // ChaCha20
     var nonce3 = crypto.getRandomValues(new Uint8Array(16));  // Twofish-CTR
     var nonce4 = crypto.getRandomValues(new Uint8Array(16));  // Serpent-CTR
-    var mks = await Promise.all([ deriveMasterKey(password, recSalt1), deriveMasterKey(password2, recSalt2) ]);
+    var mks = await Promise.all([ deriveMasterKey(password, recSalt1, kdf), deriveMasterKey(password2, recSalt2, kdf) ]);
     var mk1 = mks[0], mk2 = mks[1];
     var subs = await Promise.all([
         hkdfAesKey(mk1, _HK.payAes),
@@ -1920,7 +2102,7 @@ async function encryptFields(password, password2, recSalt1, recSalt2, fields) {
         hkdfBytes(mk2, _HK.paySerpent)
     ]);
     var aesKey = subs[0], chachaKey = subs[1], twofishKey = subs[2], serpentKey = subs[3];
-    var plain = new TextEncoder().encode(JSON.stringify(fields));
+    var plain = _padPlaintext(_TE.encode(JSON.stringify(fields)));
     var mid   = chacha20poly1305(chachaKey, nonce2).encrypt(plain);
     var ct    = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv: iv1 }, aesKey, mid));
     var tf    = twofishCTR(twofishKey, nonce3, ct);
@@ -1933,10 +2115,10 @@ async function encryptFields(password, password2, recSalt1, recSalt2, fields) {
 }
 
 // Throws on wrong key or tampered ciphertext — caller must catch.
-async function decryptFields(password, password2, recSalt1Hex, recSalt2Hex, iv1Hex, nonce2Hex, nonce3Hex, nonce4Hex, encHex) {
+async function decryptFields(password, password2, recSalt1Hex, recSalt2Hex, iv1Hex, nonce2Hex, nonce3Hex, nonce4Hex, encHex, kdf) {
     var mks = await Promise.all([
-        deriveMasterKey(password, hexToBytes(recSalt1Hex)),
-        deriveMasterKey(password2, hexToBytes(recSalt2Hex))
+        deriveMasterKey(password, hexToBytes(recSalt1Hex), kdf),
+        deriveMasterKey(password2, hexToBytes(recSalt2Hex), kdf)
     ]);
     var mk1 = mks[0], mk2 = mks[1];
     var subs = await Promise.all([
@@ -1950,19 +2132,19 @@ async function decryptFields(password, password2, recSalt1Hex, recSalt2Hex, iv1H
     var ct    = twofishCTR(twofishKey, hexToBytes(nonce3Hex), tf);
     var mid   = new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: hexToBytes(iv1Hex) }, aesKey, ct));
     var plain = chacha20poly1305(chachaKey, hexToBytes(nonce2Hex)).decrypt(mid);
-    return JSON.parse(new TextDecoder().decode(plain));
+    return JSON.parse(_TD.decode(plain));
 }
 
 // v6 name encryption: AES-256-GCM (MK1) then ChaCha20-Poly1305 (MK2).
 // Both passwords are required to decrypt. Returns { nameNonce1Hex, nameNonce2Hex, encNameHex }.
-async function encryptName(password, password2, recSalt1, recSalt2, name) {
+async function encryptName(password, password2, recSalt1, recSalt2, name, kdf) {
     var nonce1 = crypto.getRandomValues(new Uint8Array(12));  // name AES-GCM
     var nonce2 = crypto.getRandomValues(new Uint8Array(12));  // name ChaCha20
-    var mks = await Promise.all([ deriveMasterKey(password, recSalt1), deriveMasterKey(password2, recSalt2) ]);
+    var mks = await Promise.all([ deriveMasterKey(password, recSalt1, kdf), deriveMasterKey(password2, recSalt2, kdf) ]);
     var subs = await Promise.all([ hkdfAesKey(mks[0], _HK.nameAes), hkdfBytes(mks[1], _HK.nameChacha) ]);
     var aesKey = subs[0], chachaKey = subs[1];
     var mid = new Uint8Array(await crypto.subtle.encrypt(
-        { name: 'AES-GCM', iv: nonce1 }, aesKey, new TextEncoder().encode(name)
+        { name: 'AES-GCM', iv: nonce1 }, aesKey, _TE.encode(name)
     ));
     var ct = chacha20poly1305(chachaKey, nonce2).encrypt(mid);
     return {
@@ -1972,10 +2154,10 @@ async function encryptName(password, password2, recSalt1, recSalt2, name) {
 }
 
 // v6 name decryption. Throws on wrong key or tampered ciphertext.
-async function decryptName(password, password2, recSalt1Hex, recSalt2Hex, nameNonce1Hex, nameNonce2Hex, encNameHex) {
+async function decryptName(password, password2, recSalt1Hex, recSalt2Hex, nameNonce1Hex, nameNonce2Hex, encNameHex, kdf) {
     var mks = await Promise.all([
-        deriveMasterKey(password, hexToBytes(recSalt1Hex)),
-        deriveMasterKey(password2, hexToBytes(recSalt2Hex))
+        deriveMasterKey(password, hexToBytes(recSalt1Hex), kdf),
+        deriveMasterKey(password2, hexToBytes(recSalt2Hex), kdf)
     ]);
     var subs = await Promise.all([ hkdfBytes(mks[1], _HK.nameChacha), hkdfAesKey(mks[0], _HK.nameAes) ]);
     var chachaKey = subs[0], aesKey = subs[1];
@@ -1983,7 +2165,7 @@ async function decryptName(password, password2, recSalt1Hex, recSalt2Hex, nameNo
     var plain = new Uint8Array(await crypto.subtle.decrypt(
         { name: 'AES-GCM', iv: hexToBytes(nameNonce1Hex) }, aesKey, mid
     ));
-    return new TextDecoder().decode(plain);
+    return _TD.decode(plain);
 }
 
 // ============================================================
@@ -2130,8 +2312,8 @@ function doCBCopy(what) {
             break;
         case 'current': text = currentPassword; break;
     }
-    if (label && (!text.trim() || text.trim() === '------')) {
-        showToast('Nothing to copy');
+    if (!text.trim() || text.trim() === '------') {
+        if (label) showToast('Nothing to copy');
         return;
     }
     if (flashEl) {
@@ -2268,10 +2450,32 @@ async function _decodeQRFromFile(file) {
 // UI helpers
 // ============================================================
 
+var _rfpRAF = 0;   // pending requestAnimationFrame id for debounced resize
 function resizeFreezePane() {
     var fixedDiv = document.getElementById('fixedDiv');
-    var h = fixedDiv.offsetHeight;
-    document.getElementById('content').style.marginTop = h + 'px';
+    var content  = document.getElementById('content');
+    // Wide-controls mode: above 1000px float the control bar into the empty
+    // space to the right of the capped fixed panel (max-width:680px in part1)
+    // (see body.wide-controls .ctrl-form in part1).
+    var WIDE_BREAKPOINT = 1000;
+    var panelW = fixedDiv.offsetWidth;
+    var wide = window.innerWidth > WIDE_BREAKPOINT;
+    document.body.classList.toggle('wide-controls', wide);
+    document.body.style.setProperty('--panel-w', panelW + 'px');
+    var h = fixedDiv.offsetHeight;          // read AFTER class toggle (reflow)
+    var form = document.querySelector('.ctrl-form');
+    if (form) form.style.height = wide ? h + 'px' : '';  // match the display panel
+    // Integrity badge + entry count: pinned to the bottom of the control panel
+    // in wide mode, restored to its in-flow spot above the grid when narrow.
+    var ecRow = document.getElementById('entry-count-row');
+    if (form && ecRow) {
+        if (wide) {
+            if (ecRow.parentNode !== form) form.appendChild(ecRow);
+        } else if (ecRow.parentNode !== content) {
+            content.insertBefore(ecRow, document.getElementById('reveal-progress'));
+        }
+    }
+    content.style.marginTop = h + 'px';
 }
 
 var _selectedBtn = null;
@@ -2333,6 +2537,14 @@ function _setupMaskedInput(el) {
 
     el._toggleShow = function() {
         _show = !_show;
+        _setDisplay();
+    };
+
+    // Force the field back to masked display (cancels "show" mode). Used when the
+    // fields are locked after a successful verify so a revealed password can't
+    // stay on screen behind the disabled field.
+    el._hide = function() {
+        _show = false;
         _setDisplay();
     };
 
@@ -2411,6 +2623,16 @@ function _initMaskedInputs() {
 
 function toggleKey()  { document.getElementById('aeskey') ._toggleShow(); }
 function toggleKey2() { document.getElementById('aeskey2')._toggleShow(); }
+
+// Force both key fields back to masked (circles / browser dots), cancelling any
+// "show" mode. Called when decoding starts so a password left visible via the eye
+// toggle can't stay on screen while entries are being decrypted.
+function _maskKeyFields() {
+    var k1 = document.getElementById('aeskey');
+    var k2 = document.getElementById('aeskey2');
+    if (k1 && k1._hide) k1._hide();
+    if (k2 && k2._hide) k2._hide();
+}
 
 function setNotes(text) {
     var el  = document.getElementById('decnotes');
@@ -2669,7 +2891,7 @@ function _applyServerResponse(text) {
 // Decode (decrypt) an entry on click
 // ============================================================
 
-// v5: encNameHEX|v5|saltN1HEX|nonceN1HEX|saltN2HEX|nonceN2HEX|salt1HEX|iv1HEX|salt2HEX|nonce2HEX|salt3HEX|nonce3HEX|encHEX|lineIndex
+// v6: encNameHEX|v6|recSalt1HEX|recSalt2HEX|nameNonce1HEX|nameNonce2HEX|iv1HEX|nonce2HEX|nonce3HEX|nonce4HEX|encHEX|lineIndex
 async function decodeLine(passedTD, encryptedData) {
     blinkTD(passedTD);
     clearDisplay();
@@ -2701,6 +2923,9 @@ async function decodeLine(passedTD, encryptedData) {
         // make the server remove a different record.
         var rowKey = parts.slice(0, -1).join('|');
         deleteEntryRecord = rowKey;
+        // Decoding is starting — mask both key fields so a shown password isn't
+        // left on screen during decryption.
+        _maskKeyFields();
         document.getElementById('decname').textContent = 'Decrypting…';
 
         try {
@@ -2769,8 +2994,13 @@ async function decodeLine(passedTD, encryptedData) {
 // Re-hide all revealed v5 buttons and wipe the name cache (called on lock/clear).
 function _relockV5Entries() {
     // Invalidate the current reveal: abort any in-flight loop and forget the
-    // password pair that produced it.
+    // password pair that produced it. Also tear down the decode UI immediately so
+    // the progress bar / worker count don't linger past a key-field edit.
     _revealGen++;
+    _revealActive  = false;
+    var _rp = document.getElementById('reveal-progress');
+    if (_rp) _rp.style.display = 'none';
+    _hideWorkerCount();
     _lastRevealPw  = null;
     _lastRevealPw2 = null;
     _v5Names.clear();
@@ -2830,13 +3060,18 @@ function _sortEntryGrid() {
 async function _revealAllV5Names(pw, pw2) {
     var locked = Array.from(document.querySelectorAll('.entry-btn.v5-locked'));
     if (!locked.length) return;
+    // Decoding is starting — mask both key fields so a shown password isn't left
+    // on screen while names are decrypted.
+    _maskKeyFields();
     // Capture this run's generation; if the key fields change mid-loop (which bumps
     // _revealGen via _relockV5Entries) we abort rather than reveal with stale keys.
     var gen   = _revealGen;
     var total = locked.length;
+    _revealActive = true;
     var bar  = document.getElementById('reveal-progress');
     var fill = document.getElementById('reveal-progress-fill');
     if (bar)  { fill.style.width = '0%'; bar.style.display = ''; }
+    _showWorkerCount();
 
     var done       = 0;
     var nextIdx    = 0;
@@ -2888,7 +3123,9 @@ async function _revealAllV5Names(pw, pw2) {
     for (var w = 0; w < conc && w < locked.length; w++) pool.push(worker());
     await Promise.all(pool);
 
+    _revealActive = false;
     if (bar) bar.style.display = 'none';
+    _hideWorkerCount();
     // Superseded mid-flight: don't sort or record the (now-stale) password pair.
     if (gen !== _revealGen) return;
     _sortEntryGrid();
@@ -2974,10 +3211,6 @@ async function saveEntry() {
     }
 }
 
-// Alias so any cached index.html that still calls testAES() keeps working
-// until post.php regenerates the page.
-var testAES = saveEntry;
-
 // ============================================================
 // Vault tools — export / audit / master-password change
 // ============================================================
@@ -3004,12 +3237,159 @@ function exportVault() {
     showToast('Encrypted vault exported');
 }
 
+// Client mirror of post.php's is_valid_record() for v6 — a shape check so a bad
+// file is rejected before we decrypt anything or hit the network.
+function _isValidV6Record(s) {
+    if (typeof s !== 'string' || s.length > 65536) return false;
+    var p = s.split('|');
+    if (p.length !== 11 || p[1] !== 'v6') return false;
+    var hex = /^[0-9a-fA-F]+$/;
+    if (p[0] === '' || p[0].length % 2 !== 0 || !hex.test(p[0])) return false;
+    var lens = { 2: 64, 3: 64, 4: 24, 5: 24, 6: 24, 7: 24, 8: 32, 9: 32 };
+    for (var i in lens) {
+        if (p[i].length !== lens[i] || !hex.test(p[i])) return false;
+    }
+    if (p[10] === '' || p[10].length % 2 !== 0 || !hex.test(p[10])) return false;
+    return true;
+}
+
+var _importBusy = false;
+
+// Open a file picker for an exported .lines vault, then hand it to the importer.
+// Transient hidden input (same idiom as scanQRCode) — no persistent template node.
+function _importVaultClick() {
+    if (_importBusy) return;
+    var fileInput = document.createElement('input');
+    fileInput.type   = 'file';
+    fileInput.accept = '.lines,text/plain';
+    fileInput.style.cssText = 'position:fixed;top:0;left:0;opacity:0;pointer-events:none';
+    document.body.appendChild(fileInput);
+
+    fileInput.addEventListener('change', function() {
+        var file = fileInput.files[0];
+        if (fileInput.parentNode) document.body.removeChild(fileInput);
+        if (file) _importVaultFile(file);
+    });
+
+    // Clean up the orphaned input if the picker is dismissed without a selection.
+    window.addEventListener('focus', function onFocus() {
+        window.removeEventListener('focus', onFocus);
+        setTimeout(function() {
+            if (fileInput.parentNode) document.body.removeChild(fileInput);
+        }, 500);
+    }, { once: true });
+
+    fileInput.click();
+}
+
+function _readFileText(file) {
+    return new Promise(function(resolve, reject) {
+        var r = new FileReader();
+        r.onload  = function() { resolve(String(r.result)); };
+        r.onerror = function() { reject(new Error('could not read file')); };
+        r.readAsText(file);
+    });
+}
+
+// Replace the entire vault with the records in an exported .lines file.
+// All-or-nothing: the upload is parsed, shape-validated, and FULLY decrypted with
+// the current key-field passwords before anything is sent, so a committed import is
+// guaranteed readable. Mirrors changeMasterPasswords' bulk-commit + re-sign tail.
+async function _importVaultFile(file) {
+    var out = document.getElementById('import-status');
+    function say(msg) { if (out) { out.style.display = ''; out.textContent = msg; } }
+
+    var pw  = document.getElementById('aeskey').value;
+    var pw2 = document.getElementById('aeskey2').value;
+    if (!pw || !pw2) { say('Enter both passwords in the key fields first.'); return; }
+
+    var text;
+    try { text = await _readFileText(file); }
+    catch (e) { say('Import failed — ' + e.message); return; }
+
+    var rows = text.split(/\r\n|\r|\n/)
+                   .map(function(s) { return s.trim(); })
+                   .filter(function(s) { return s !== ''; });
+    if (!rows.length) { say('That file contains no vault entries.'); return; }
+    for (var i = 0; i < rows.length; i++) {
+        if (!_isValidV6Record(rows[i])) {
+            say('Not a valid vault export — line ' + (i + 1) + ' is malformed.');
+            return;
+        }
+    }
+
+    var curCount = _allEntries.length;
+    var plural   = function(n) { return n === 1 ? 'y' : 'ies'; };
+    if (!window.confirm('Replace ' + curCount + ' current entr' + plural(curCount)
+            + ' with ' + rows.length + ' imported entr' + plural(rows.length)
+            + '?\n\nThis overwrites the whole vault. A backup of the current vault '
+            + 'is saved on the server before the import.')) {
+        say('');
+        return;
+    }
+
+    _importBusy = true;
+    try {
+        // Decrypt-verify EVERY imported record with the current passwords before
+        // sending — any failure aborts here, nothing is written. The derivations
+        // populate _mkCache (kept, since the passwords don't change) so clicking an
+        // imported entry afterwards is instant.
+        say('Verifying… 0 / ' + rows.length);
+        var pairs;
+        try {
+            pairs = await _forEachRecordDecrypt(pw, pw2, function(rec, name) {
+                return { record: rec, name: name };
+            }, function(done) { say('Verifying… ' + done + ' / ' + rows.length); }, rows);
+        } catch (e) {
+            say('Import aborted — these entries do not match the passwords entered ('
+                + e.message + '). The vault was not modified.');
+            return;
+        }
+
+        // expect_hash over the CURRENT vault — identical computation to
+        // changeMasterPasswords / post.php (records joined with "\n", no trailing NL).
+        var oldJoined = _allEntries.map(function(row) {
+            return row.split('|').slice(0, -1).join('|');
+        }).join('\n');
+        var hashBuf    = await crypto.subtle.digest('SHA-256', _TE.encode(oldJoined));
+        var expectHash = bytesToHex(new Uint8Array(hashBuf));
+
+        say('Importing…');
+        var responseText = await _xhrPost('restore=1&expect_hash=' + expectHash
+                                          + '&bulk_data=' + encodeURIComponent(rows.join('\n')));
+
+        // Committed server-side. The old vault's names are gone, so drop the stale
+        // name cache and pre-seed it with the imported ones so the grid reveals
+        // instantly. Passwords are unchanged, so _mkCache is left intact.
+        _v5Names.clear();
+        pairs.forEach(function(p) { _v5Names.set(p.record, p.name); });
+        _lastRevealPw  = pw;
+        _lastRevealPw2 = pw2;
+        clearDisplay();
+        try { _applyServerResponse(responseText); } catch (_) { location.reload(); return; }
+        _revealCachedV5Buttons();
+        _signAfterWrite();   // re-sign the restored set → fresh monotonic revision
+        say('');
+        showToast('Vault imported — ' + rows.length + ' entries restored');
+    } catch (e) {
+        if (e.stale) {
+            say('The vault changed during import — nothing was modified. Reload and retry.');
+        } else {
+            say('Import failed — ' + e.message + '. The vault was not modified.');
+        }
+    } finally {
+        _importBusy = false;
+    }
+}
+
 // Decrypt every record with the given passwords and feed (record, name, fields)
 // to `handler`, with the same bounded concurrency as reveal-all (Argon2id runs
 // on the worker pool). All-or-nothing: the first failure aborts the run and
 // throws, so callers never act on a partially decrypted vault.
-async function _forEachRecordDecrypt(pw, pw2, handler, progressCb) {
-    var rows = _allEntries.map(function(row) {
+async function _forEachRecordDecrypt(pw, pw2, handler, progressCb, rowsIn) {
+    // Default to the current vault (canonical form: trailing line index stripped);
+    // callers may pass an explicit rows array (e.g. import verifies uploaded rows).
+    var rows = rowsIn || _allEntries.map(function(row) {
         return row.split('|').slice(0, -1).join('|');
     });
     var results = new Array(rows.length);
@@ -3041,7 +3421,7 @@ async function _forEachRecordDecrypt(pw, pw2, handler, progressCb) {
     return results;
 }
 
-// Decrypt all payloads locally and flag reused / weak / empty passwords.
+// Decrypt all payloads locally and flag reused / weak / fair / empty passwords.
 // Renders entry names only — never the passwords themselves. No network I/O.
 async function auditVault() {
     var pw  = document.getElementById('aeskey').value;
@@ -3049,7 +3429,7 @@ async function auditVault() {
     var out = document.getElementById('audit-result');
     if (!out) return;
     out.style.display = '';
-    if (!pw || !pw2) { out.textContent = 'Enter both passwords first.'; return; }
+    if (!_isVaultUnlocked()) { out.textContent = 'Enter both passwords and unlock the vault first.'; return; }
     if (!_allEntries.length) { out.textContent = 'Vault is empty.'; return; }
 
     out.textContent = 'Auditing… 0 / ' + _allEntries.length;
@@ -3066,10 +3446,12 @@ async function auditVault() {
     }
 
     var byPassword = new Map();
-    var weak = [], empty = [];
+    var weak = [], fair = [], empty = [];
     items.forEach(function(it) {
         if (!it.password) { empty.push(it.name); return; }
-        if (_estimateBits(it.password) < 40) weak.push(it.name);
+        var bits = _estimateBits(it.password);
+        if (bits < 40) weak.push(it.name);
+        else if (bits < 80) fair.push(it.name);
         if (!byPassword.has(it.password)) byPassword.set(it.password, []);
         byPassword.get(it.password).push(it.name);
     });
@@ -3083,8 +3465,8 @@ async function auditVault() {
         d.textContent = txt;
         out.appendChild(d);
     }
-    if (!reused.length && !weak.length && !empty.length) {
-        addLine('✓ No reused, weak, or empty passwords across '
+    if (!reused.length && !weak.length && !fair.length && !empty.length) {
+        addLine('✓ No reused, weak, fair, or empty passwords across '
                 + items.length + ' entries.', 'audit-ok');
         return;
     }
@@ -3093,15 +3475,57 @@ async function auditVault() {
                 + names.join(', '), 'audit-bad');
     });
     if (weak.length)  addLine('⚠ Weak (under 40 bits): ' + weak.join(', '), 'audit-warn');
+    if (fair.length)  addLine('⚠ Fair (40–80 bits): ' + fair.join(', '), 'audit-warn');
     if (empty.length) addLine('— No password stored: ' + empty.join(', '), 'audit-warn');
+}
+
+// True only when both key fields are filled AND those passwords have already
+// unlocked the vault (a successful reveal-all with the same pair). An empty
+// vault counts as unlocked once both passwords are present — there is nothing
+// to reveal. Used to gate Audit and Change Passwords, which both need a
+// known-good password pair before they decrypt the whole vault.
+function _isVaultUnlocked() {
+    var pw  = document.getElementById('aeskey').value;
+    var pw2 = document.getElementById('aeskey2').value;
+    if (!pw || !pw2) return false;
+    if (!_allEntries.length) return true;
+    return _lastRevealPw === pw && _lastRevealPw2 === pw2;
 }
 
 function toggleChangePw() {
     var f = document.getElementById('chpw-form');
     if (!f) return;
-    var visible = f.style.display !== 'none';
-    f.style.display = visible ? 'none' : '';
-    if (!visible) document.getElementById('newpw1').focus();
+    var locked  = document.getElementById('chpw-locked');
+    var visible = f.style.display !== 'none' || (locked && locked.style.display !== 'none');
+    if (visible) {
+        f.style.display = 'none';
+        if (locked) locked.style.display = 'none';
+        return;
+    }
+    if (!_isVaultUnlocked()) {
+        if (locked) locked.style.display = '';
+        return;
+    }
+    if (locked) locked.style.display = 'none';
+    f.style.display = '';
+    updateChpwMatch();
+    var first = document.getElementById('newpw1');
+    first.focus();
+    first.select();
+    // Scroll the form fully into view so the Re-encrypt (submit) button at
+    // its bottom isn't left below the fold of the About modal.
+    var btn = document.getElementById('btn-chpw-go');
+    if (btn && btn.scrollIntoView) btn.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+// Show/hide the plaintext of the four new-password fields in the Change
+// Passwords form, driven by the #chpw-show checkbox.
+function toggleChpwShow(cb) {
+    var show = cb ? cb.checked : false;
+    ['newpw1', 'newpw1c', 'newpw2', 'newpw2c'].forEach(function(id) {
+        var el = document.getElementById(id);
+        if (el) el.type = show ? 'text' : 'password';
+    });
 }
 
 // Re-encrypt the whole vault under new master passwords. Fully client-side
@@ -3152,7 +3576,7 @@ async function changeMasterPasswords() {
         var oldJoined = _allEntries.map(function(row) {
             return row.split('|').slice(0, -1).join('|');
         }).join('\n');
-        var hashBuf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(oldJoined));
+        var hashBuf = await crypto.subtle.digest('SHA-256', _TE.encode(oldJoined));
         var expectHash = bytesToHex(new Uint8Array(hashBuf));
 
         say('Saving…');
@@ -3193,6 +3617,178 @@ async function changeMasterPasswords() {
     }
 }
 
+// The five device-class presets shown in the Change KDF Parameters table, in
+// slider order (index 1..5). Each preset's mem (MiB) + iterations mirror a row
+// of the #about-kdf table so the slider and the table stay in lockstep.
+var _KDF_PRESETS = [
+    { mem: 64,   time: 3, label: 'Small portable' },
+    { mem: 128,  time: 3, label: 'Laptop / desktop' },
+    { mem: 256,  time: 4, label: 'Modern desktop' },
+    { mem: 512,  time: 4, label: 'Large workstation' },
+    { mem: 1024, time: 5, label: 'Workstation, max' }
+];
+
+// Slider index (1-based) for a given mem/iterations pair: an exact match if the
+// params sit on a preset, else the nearest preset by memory (so the slider still
+// lands somewhere sensible after a manual edit or a non-preset vault cost).
+function _kdfPresetIndexFor(memMiB, iters) {
+    for (var i = 0; i < _KDF_PRESETS.length; i++) {
+        if (_KDF_PRESETS[i].mem === memMiB && _KDF_PRESETS[i].time === iters) return i + 1;
+    }
+    var best = 0, bestDiff = Infinity;
+    for (var j = 0; j < _KDF_PRESETS.length; j++) {
+        var d = Math.abs(_KDF_PRESETS[j].mem - memMiB);
+        if (d < bestDiff) { bestDiff = d; best = j; }
+    }
+    return best + 1;
+}
+
+// Apply slider preset `idx` (1-based) to the mem/iterations number inputs and
+// refresh the slider's text label.
+function _kdfSliderApply(idx) {
+    var p = _KDF_PRESETS[idx - 1];
+    if (!p) return;
+    var memEl = document.getElementById('kdf-mem');
+    var tEl   = document.getElementById('kdf-time');
+    if (memEl) memEl.value = p.mem;
+    if (tEl)   tEl.value   = p.time;
+    var lbl = document.getElementById('kdf-slider-lbl');
+    if (lbl) lbl.textContent = p.label + ' — ' + p.mem + ' MiB, ' + p.time + ' iter';
+}
+
+// Sync the slider position + label to the current mem/iterations input values.
+function _kdfSyncSlider() {
+    var memEl = document.getElementById('kdf-mem');
+    var tEl   = document.getElementById('kdf-time');
+    var idx = _kdfPresetIndexFor(
+        parseInt(memEl && memEl.value, 10) || 128,
+        parseInt(tEl && tEl.value, 10) || 3
+    );
+    var slider = document.getElementById('kdf-slider');
+    if (slider) slider.value = String(idx);
+    var lbl = document.getElementById('kdf-slider-lbl');
+    var p = _KDF_PRESETS[idx - 1];
+    if (lbl && p) lbl.textContent = p.label + ' — ' + p.mem + ' MiB, ' + p.time + ' iter';
+}
+
+// Show/hide the Change KDF Parameters form, gating on a successfully unlocked
+// vault (same gate as Change Passwords). Pre-fills the inputs with the active
+// vault params each time it opens.
+function toggleChangeKdf() {
+    var f = document.getElementById('kdf-form');
+    if (!f) return;
+    var locked  = document.getElementById('kdf-locked');
+    var visible = f.style.display !== 'none' || (locked && locked.style.display !== 'none');
+    if (visible) {
+        f.style.display = 'none';
+        if (locked) locked.style.display = 'none';
+        return;
+    }
+    if (!_isVaultUnlocked()) {
+        if (locked) locked.style.display = '';
+        return;
+    }
+    if (locked) locked.style.display = 'none';
+    // Pre-fill from the active params (memory shown in MiB).
+    var memEl = document.getElementById('kdf-mem');
+    var tEl   = document.getElementById('kdf-time');
+    if (memEl) memEl.value = Math.round(_vaultKdf.memorySize / 1024);
+    if (tEl)   tEl.value   = _vaultKdf.iterations;
+    _kdfSyncSlider();
+    f.style.display = '';
+    var btn = document.getElementById('btn-kdf-go');
+    if (btn && btn.scrollIntoView) btn.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+// Re-encrypt the whole vault at a new Argon2id cost. Identical shape to
+// changeMasterPasswords (same atomic bulk replace + 409 staleness handling), but
+// the passwords are unchanged: each record is decrypted with the OLD params
+// (the default in _forEachRecordDecrypt → _vaultKdf) and re-encrypted with the
+// NEW params, fresh salts/nonces. The new params ride along in the bulk write so
+// `lines` and `kdfparams` change atomically; the manifest is re-signed at the new
+// cost afterwards (so integrity follows, and a later downgrade is detectable).
+async function changeKdfParams() {
+    var pw  = document.getElementById('aeskey').value;
+    var pw2 = document.getElementById('aeskey2').value;
+    var status = document.getElementById('kdf-status');
+    function say(msg) { if (status) status.textContent = msg; }
+
+    if (!_isVaultUnlocked()) { say('Enter both passwords and unlock the vault first.'); return; }
+    if (!_allEntries.length) { say('Vault is empty — nothing to re-encrypt.'); return; }
+
+    var memMiB = parseInt(document.getElementById('kdf-mem').value, 10);
+    var iters  = parseInt(document.getElementById('kdf-time').value, 10);
+    if (!isFinite(memMiB) || !isFinite(iters)) { say('Enter valid numbers for memory and iterations.'); return; }
+    var newKdf = _parseKdf('a2id|' + (memMiB * 1024) + '|' + iters + '|1');
+    if (!newKdf) {
+        say('Out of range — memory ' + (KDF_MEM_MIN_KIB / 1024) + '–' + (KDF_MEM_MAX_KIB / 1024)
+            + ' MiB, iterations ' + KDF_TIME_MIN + '–' + KDF_TIME_MAX + '.');
+        return;
+    }
+    if (newKdf.memorySize === _vaultKdf.memorySize && newKdf.iterations === _vaultKdf.iterations) {
+        say('Those are already the current parameters.'); return;
+    }
+
+    var oldKdf = _vaultKdf;
+    var btn = document.getElementById('btn-kdf-go');
+    if (btn) btn.disabled = true;
+    var total = _allEntries.length;
+    try {
+        say('Re-encrypting… 0 / ' + total);
+        var pairs = await _forEachRecordDecrypt(pw, pw2, async function(rec, name, fields) {
+            var recSalt1 = crypto.getRandomValues(new Uint8Array(32));
+            var recSalt2 = crypto.getRandomValues(new Uint8Array(32));
+            var nameEnc = await encryptName(pw, pw2, recSalt1, recSalt2, name, newKdf);
+            var result  = await encryptFields(pw, pw2, recSalt1, recSalt2, fields, newKdf);
+            var newRec  = [nameEnc.encNameHex, 'v6',
+                           bytesToHex(recSalt1),  bytesToHex(recSalt2),
+                           nameEnc.nameNonce1Hex, nameEnc.nameNonce2Hex,
+                           result.iv1Hex,         result.nonce2Hex,
+                           result.nonce3Hex,      result.nonce4Hex,
+                           result.encHex].join('|');
+            return { newRec: newRec, name: name };
+        }, function(done) { say('Re-encrypting… ' + done + ' / ' + total); });
+
+        // Hash of the snapshot we re-encrypted (records joined with "\n", no
+        // trailing newline) — must match post.php's computation exactly.
+        var oldJoined = _allEntries.map(function(row) {
+            return row.split('|').slice(0, -1).join('|');
+        }).join('\n');
+        var hashBuf = await crypto.subtle.digest('SHA-256', _TE.encode(oldJoined));
+        var expectHash = bytesToHex(new Uint8Array(hashBuf));
+
+        say('Saving…');
+        var bulkData = pairs.map(function(p) { return p.newRec; }).join('\n');
+        var responseText = await _xhrPost('bulk=1&expect_hash=' + expectHash
+                                          + '&bulk_data=' + encodeURIComponent(bulkData)
+                                          + '&kdf=' + encodeURIComponent(_kdfToString(newKdf)));
+
+        // Committed server-side: switch this session to the new cost. Passwords
+        // are unchanged, so the reveal throttle (_lastRevealPw/Pw2) stays valid.
+        _vaultKdf = newKdf;
+        _mkCache.clear();          // every cached key was derived at the old cost
+        _terminateArgonPool();     // rebuild the worker pool sized for the new memory cost
+        _v5Names.clear();
+        pairs.forEach(function(p) { _v5Names.set(p.newRec, p.name); });
+        clearDisplay();
+        try { _applyServerResponse(responseText); } catch (_) { location.reload(); return; }
+        _revealCachedV5Buttons();
+        _signAfterWrite();         // re-sign at the new cost — manifest follows
+        say('');
+        toggleChangeKdf();
+        showToast('KDF parameters changed — ' + total + ' entries re-encrypted');
+    } catch (e) {
+        _vaultKdf = oldKdf;        // nothing committed — restore the active cost
+        if (e.stale) {
+            say('The vault changed while re-encrypting — nothing was modified. Close, reload, and retry.');
+        } else {
+            say('KDF change failed — ' + e.message + '. The vault was not modified.');
+        }
+    } finally {
+        if (btn) btn.disabled = false;
+    }
+}
+
 // Wipe vault-tools state (audit results, half-typed new passwords). Called from
 // _relockV5Entries, which runs on every lock / clear / key-field edit.
 function _clearVaultTools() {
@@ -3200,12 +3796,26 @@ function _clearVaultTools() {
     if (out) { out.textContent = ''; out.style.display = 'none'; }
     ['newpw1', 'newpw1c', 'newpw2', 'newpw2c'].forEach(function(id) {
         var el = document.getElementById(id);
-        if (el) el.value = '';
+        if (el) { el.value = ''; el.type = 'password'; }
     });
+    var showCb = document.getElementById('chpw-show');
+    if (showCb) showCb.checked = false;
+    updateChpwStrength();
+    updateChpwMatch();
     var f = document.getElementById('chpw-form');
     if (f) f.style.display = 'none';
+    var locked = document.getElementById('chpw-locked');
+    if (locked) locked.style.display = 'none';
     var status = document.getElementById('chpw-status');
     if (status) status.textContent = '';
+    var imp = document.getElementById('import-status');
+    if (imp) { imp.textContent = ''; imp.style.display = 'none'; }
+    var kf = document.getElementById('kdf-form');
+    if (kf) kf.style.display = 'none';
+    var kl = document.getElementById('kdf-locked');
+    if (kl) kl.style.display = 'none';
+    var ks = document.getElementById('kdf-status');
+    if (ks) ks.textContent = '';
 }
 
 // ============================================================
@@ -3266,7 +3876,7 @@ function _canonicalRecords() {
 }
 
 async function _sha256Hex(str) {
-    var buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
+    var buf = await crypto.subtle.digest('SHA-256', _TE.encode(str));
     return bytesToHex(new Uint8Array(buf));
 }
 
@@ -3284,7 +3894,7 @@ async function _manifestHmacHex(pw, pw2, salt1Hex, salt2Hex, revision, timestamp
     );
     var msg = 'vm1|' + salt1Hex + '|' + salt2Hex + '|' + revision + '|' + timestamp
             + '\n' + records.join('\n');
-    var sig = await crypto.subtle.sign('HMAC', ck, new TextEncoder().encode(msg));
+    var sig = await crypto.subtle.sign('HMAC', ck, _TE.encode(msg));
     return bytesToHex(new Uint8Array(sig));
 }
 
@@ -3293,7 +3903,11 @@ async function _manifestHmacHex(pw, pw2, salt1Hex, salt2Hex, revision, timestamp
 function _setKeyFieldsLocked(locked) {
     ['aeskey', 'aeskey2'].forEach(function(id) {
         var el = document.getElementById(id);
-        if (el) el.disabled = locked;
+        if (!el) return;
+        // Cancel any "show" reveal before disabling so the cleartext password
+        // is never left visible behind a locked field.
+        if (locked && el._hide) el._hide();
+        el.disabled = locked;
     });
     ['toggle-key', 'toggle-key2'].forEach(function(action) {
         var btn = document.querySelector('[data-action="' + action + '"]');
@@ -3493,8 +4107,24 @@ function filterSearch(query) {
 // About modal — runtime self-test
 // ============================================================
 
+// All six self-test status chips. Reset together to the loading state before a
+// run so none keep a stale ✓/⚠ from a previous run (see openAbout/retestCrypto).
+var _SELFTEST_IDS = ['st-webcrypto', 'st-chacha', 'st-aes', 'st-twofish', 'st-serpent', 'st-argon2'];
+
+function _resetSelftestChips() {
+    _SELFTEST_IDS.forEach(function(id) {
+        var el = document.getElementById(id);
+        if (!el) return;
+        el.className = 'selftest-status loading';
+        el.textContent = '…';
+        el.title = '';
+    });
+    var banner = document.getElementById('selftest-banner');
+    if (banner) { banner.className = ''; banner.textContent = '… Running tests'; }
+}
+
 async function runCryptoSelfTest() {
-    var PLAIN   = new TextEncoder().encode('CryptoSelfTest-OK');
+    var PLAIN   = _TE.encode('CryptoSelfTest-OK');
     var KEY32   = new Uint8Array(32);   // 32 zero bytes — test key only
     var NONCE12 = new Uint8Array(12);
     var NONCE16 = new Uint8Array(16);
@@ -3574,8 +4204,8 @@ async function runCryptoSelfTest() {
     try {
         var KAT = '561b06cd267388c9b4a815b12023fb73c56d956e121347e758ba941fa4d4b2df';
         var ah  = await argon2idHash(
-            new TextEncoder().encode('argon2id-selftest'),
-            new TextEncoder().encode('vault-selftest!!'),
+            _TE.encode('argon2id-selftest'),
+            _TE.encode('vault-selftest!!'),
             { iterations: 2, memorySize: 256, parallelism: 1, hashLength: 32 }
         );
         argonOk = bytesToHex(ah) === KAT;
@@ -3586,13 +4216,14 @@ async function runCryptoSelfTest() {
     var banner = document.getElementById('selftest-banner');
     if (banner) {
         banner.classList.remove('ok', 'fail');
+        var stamp = new Date().toLocaleString();
         if (fail === 0) {
             banner.classList.add('ok');
-            banner.textContent = '✓ Self-test passed — all ' + pass + ' checks OK';
+            banner.textContent = '✓ Self-test passed — all ' + pass + ' checks OK · ' + stamp;
         } else {
             banner.classList.add('fail');
             banner.textContent = '⚠ Self-test: ' + fail + ' of ' + (pass + fail) +
-                                 ' check' + (fail === 1 ? '' : 's') + ' failed';
+                                 ' check' + (fail === 1 ? '' : 's') + ' failed · ' + stamp;
         }
     }
 
@@ -3623,21 +4254,79 @@ function closeCryptoWarn() {
 }
 
 function openAbout() {
-    ['st-webcrypto', 'st-chacha', 'st-aes', 'st-twofish'].forEach(function(id) {
-        var el = document.getElementById(id);
-        if (!el) return;
-        el.className = 'selftest-status loading';
-        el.textContent = '…';
-        el.title = '';
-    });
-    var banner = document.getElementById('selftest-banner');
-    if (banner) { banner.className = ''; banner.textContent = '… Running tests'; }
+    _resetSelftestChips();
+    var auditOut = document.getElementById('audit-result');
+    if (auditOut) { auditOut.textContent = ''; auditOut.style.display = 'none'; }
     document.getElementById('about-overlay').classList.add('open');
+    var aboutBody = document.getElementById('about-body');
+    if (aboutBody) aboutBody.scrollTop = 0;
     runCryptoSelfTest();
 }
 
 function closeAbout() {
     document.getElementById('about-overlay').classList.remove('open');
+    _hideAboutTip();
+}
+
+// About-modal tooltips. The CSS ::after tooltip is clipped by the modal's scroll
+// container (#about-body) / overflow:hidden box (#about-box), so for controls
+// inside the modal we render the tip into a single position:fixed element on
+// <body> (#js-tooltip) that escapes all overflow ancestors. Delegated hover with
+// the same ~1.2s reveal delay as the CSS tooltips; clamped to the viewport.
+var _aboutTipEl    = null;
+var _aboutTipTimer = null;
+var _aboutTipFor   = null;
+function _hideAboutTip() {
+    if (_aboutTipTimer) { clearTimeout(_aboutTipTimer); _aboutTipTimer = null; }
+    _aboutTipFor = null;
+    if (_aboutTipEl) { _aboutTipEl.classList.remove('show'); _aboutTipEl.style.display = 'none'; }
+}
+function _positionAboutTip(el) {
+    var tip = _aboutTipEl;
+    var r   = el.getBoundingClientRect();
+    tip.style.display = 'block';        // make it measurable
+    var tw = tip.offsetWidth, th = tip.offsetHeight;
+    var pad = 8, gap = 7;
+    var vw = document.documentElement.clientWidth;
+    var vh = document.documentElement.clientHeight;
+    var top = r.top - th - gap;         // prefer above
+    if (top < pad) top = r.bottom + gap;            // no room → below
+    if (top + th > vh - pad) top = Math.max(pad, vh - pad - th);
+    var left = r.left + r.width / 2 - tw / 2;        // centered on the trigger
+    if (left < pad) left = pad;
+    if (left + tw > vw - pad) left = vw - pad - tw;
+    tip.style.top  = top + 'px';
+    tip.style.left = left + 'px';
+    tip.classList.add('show');
+}
+function _initAboutTooltips() {
+    var overlay = document.getElementById('about-overlay');
+    var body    = document.getElementById('about-body');
+    if (!overlay || !body) return;
+    if (!_aboutTipEl) {
+        _aboutTipEl = document.createElement('div');
+        _aboutTipEl.id = 'js-tooltip';
+        document.body.appendChild(_aboutTipEl);
+    }
+    overlay.addEventListener('mouseover', function(e) {
+        var el = e.target.closest ? e.target.closest('[data-tip]') : null;
+        if (!el || !body.contains(el) || el === _aboutTipFor) return;
+        _hideAboutTip();
+        _aboutTipFor = el;
+        var text = el.getAttribute('data-tip');
+        _aboutTipTimer = setTimeout(function() {
+            _aboutTipEl.textContent = text;
+            _positionAboutTip(el);
+        }, 1200);
+    });
+    overlay.addEventListener('mouseout', function(e) {
+        if (!_aboutTipFor) return;
+        var to = e.relatedTarget;
+        if (to && _aboutTipFor.contains(to)) return;   // still within the trigger
+        _hideAboutTip();
+    });
+    // Scrolling the modal would leave a stale fixed tip floating — drop it.
+    body.addEventListener('scroll', _hideAboutTip);
 }
 
 // ============================================================
@@ -3655,33 +4344,119 @@ function _estimateBits(val) {
     return pool > 1 ? Math.log2(pool) * val.length : 0;
 }
 
-function updatePWStrength() {
-    var val  = document.getElementById('password').value;
-    var wrap = document.getElementById('pw-strength-wrap');
+// Shared six-tier strength palette (label + bar colour), single source of
+// truth for both strength meters below. The bit thresholds differ per meter
+// (single field vs. summed two-key bar) but the tier colours/labels are common.
+var _STRENGTH_TIERS = [
+    { label: 'Weak',        color: '#ff5c5c' },
+    { label: 'Fair',        color: '#f5a623' },
+    { label: 'Strong',      color: '#3fcf8e' },
+    { label: 'Very Strong', color: '#4d8eff' },
+    { label: 'Exceptional', color: '#a878ff' },
+    { label: 'Paranoid',    color: '#ff5cc8' }
+];
+
+// Render a six-segment strength bar for `val` into the elements named by the
+// `ids` prefixes (wrap container, `seg` segment-id prefix, label, entropy).
+// Shared by the new-entry password field and the Change Passwords form fields.
+function _renderStrengthBar(val, ids) {
+    var wrap = document.getElementById(ids.wrap);
     if (!wrap) return;
     if (!val) { wrap.style.display = 'none'; return; }
 
     var bits = _estimateBits(val);
 
-    var level, label, color;
-    if      (bits < 40)  { level = 1; label = 'Weak';        color = '#ff5c5c'; }
-    else if (bits < 80)  { level = 2; label = 'Fair';        color = '#f5a623'; }
-    else if (bits < 120) { level = 3; label = 'Strong';      color = '#3fcf8e'; }
-    else                 { level = 4; label = 'Very Strong';  color = '#4d8eff'; }
+    var level;
+    if      (bits < 40)  level = 1;
+    else if (bits < 80)  level = 2;
+    else if (bits < 120) level = 3;
+    else if (bits < 160) level = 4;
+    else if (bits < 200) level = 5;
+    else                 level = 6;
+    var label = _STRENGTH_TIERS[level - 1].label, color = _STRENGTH_TIERS[level - 1].color;
 
-    for (var i = 1; i <= 4; i++) {
-        var seg = document.getElementById('pw-seg-' + i);
+    for (var i = 1; i <= 6; i++) {
+        var seg = document.getElementById(ids.seg + i);
         if (seg) seg.style.background = i <= level ? color : '';
     }
-    var lbl = document.getElementById('pw-strength-lbl');
+    var lbl = document.getElementById(ids.lbl);
     if (lbl) { lbl.textContent = label; lbl.style.color = color; }
-    var ent = document.getElementById('pw-entropy-lbl');
+    var ent = document.getElementById(ids.ent);
     if (ent) ent.textContent = bits.toFixed(1) + ' bits';
 
     wrap.style.display = '';
 }
 
-// Combined vault-key strength bar.
+function updatePWStrength() {
+    _renderStrengthBar(document.getElementById('password').value, {
+        wrap: 'pw-strength-wrap', seg: 'pw-seg-', lbl: 'pw-strength-lbl', ent: 'pw-entropy-lbl'
+    });
+}
+
+// Single combined strength bar for the primary (newpw1) + secondary (newpw2)
+// new passwords in the Change Passwords form. Uses the same combined-bits
+// method as the main-page vault-key bar (see _renderCombinedKeyBar).
+function updateChpwStrength() {
+    _renderCombinedKeyBar(
+        document.getElementById('newpw1').value,
+        document.getElementById('newpw2').value,
+        { bar: 'chpw-strength-bar', seg: 'chpw-vkb-', lbl: 'chpw-strength-lbl' }
+    );
+}
+
+// Per-pair "passwords match" indicator for the Change Passwords form. Shown
+// only once the confirm field has content; green when it matches its password,
+// red otherwise. Also gates the Re-encrypt button: it stays disabled until both
+// new passwords are non-empty and each equals its confirmation.
+function updateChpwMatch() {
+    var allOk = true;
+    [['newpw1', 'newpw1c', 'chpw-match-1'], ['newpw2', 'newpw2c', 'chpw-match-2']].forEach(function(t) {
+        var pw  = document.getElementById(t[0]);
+        var cf  = document.getElementById(t[1]);
+        var out = document.getElementById(t[2]);
+        if (!pw || !cf || !out) { allOk = false; return; }
+        if (!pw.value || pw.value !== cf.value) allOk = false;
+        if (!cf.value) { out.textContent = ''; out.className = 'chpw-match'; return; }
+        if (pw.value === cf.value) { out.textContent = '✓ Passwords match';   out.className = 'chpw-match match'; }
+        else                       { out.textContent = '✗ Passwords differ';  out.className = 'chpw-match nomatch'; }
+    });
+    var btn = document.getElementById('btn-chpw-go');
+    if (btn) btn.disabled = !allOk;
+}
+
+// Combined two-key strength bar — renders the *summed* estimated bits of both
+// passwords into the elements named by `ids` (bar container, `seg` id prefix,
+// label). Shared by the main-page vault-key bar and the Change Passwords form.
+// Colour thresholds use combined raw bits across both keys. They are set
+// deliberately high: _estimateBits is charset×length and badly overestimates
+// dictionary words, so the scale assumes the estimate is ~2× optimistic.
+// Argon2id's time-hardening is treated as margin, not credited as bits.
+// nLit is decoupled from colour so segments fill in every ~30 raw bits.
+function _renderCombinedKeyBar(pw1, pw2, ids) {
+    var bar = document.getElementById(ids.bar);
+    if (!bar) return 0;
+    var bits = _estimateBits(pw1) + _estimateBits(pw2);
+    if (!pw1 && !pw2) { bar.style.opacity = '0'; return bits; }
+    bar.style.opacity = '1';
+    var idx;
+    if      (bits < 45)  idx = 0;
+    else if (bits < 80)  idx = 1;
+    else if (bits < 115) idx = 2;
+    else if (bits < 150) idx = 3;
+    else if (bits < 185) idx = 4;
+    else                 idx = 5;
+    var color = _STRENGTH_TIERS[idx].color, label = _STRENGTH_TIERS[idx].label;
+    var nLit = bits > 0 ? Math.min(6, Math.floor(bits / 30) + 1) : 0;
+    for (var i = 1; i <= 6; i++) {
+        var seg = document.getElementById(ids.seg + i);
+        if (seg) seg.style.background = i <= nLit ? color : '';
+    }
+    var lbl = document.getElementById(ids.lbl);
+    if (lbl) { lbl.textContent = label; lbl.style.color = color; }
+    return bits;
+}
+
+// Main-page vault-key bar: also gates the New button on combined strength.
 // Colour thresholds use combined raw bits across both keys. They are set
 // deliberately high: _estimateBits is charset×length and badly overestimates
 // dictionary words, so the scale assumes the estimate is ~2× optimistic.
@@ -3702,38 +4477,37 @@ function _updateVaultKeyBar() {
         newBtn.disabled    = tooWeak;
         newBtn.textContent = tooWeak ? 'Too Weak' : '＋ New';
     }
-    if (locked || (!pw1 && !pw2)) { bar.style.opacity = '0'; return; }
-    bar.style.opacity = '1';
-    var color, label;
-    if      (bits < 45)  { color = '#ff5c5c'; label = 'Weak'; }
-    else if (bits < 80)  { color = '#f5a623'; label = 'Fair'; }
-    else if (bits < 115) { color = '#3fcf8e'; label = 'Strong'; }
-    else                 { color = '#4d8eff'; label = 'Very Strong'; }
-    var nLit = bits > 0 ? Math.min(4, Math.floor(bits / 30) + 1) : 0;
-    for (var i = 1; i <= 4; i++) {
-        var seg = document.getElementById('vkb-' + i);
-        if (seg) seg.style.background = i <= nLit ? color : '';
-    }
-    var lbl = document.getElementById('vault-key-lbl');
-    if (lbl) { lbl.textContent = label; lbl.style.color = color; }
+    if (locked) { bar.style.opacity = '0'; return; }
+    _renderCombinedKeyBar(pw1, pw2, { bar: 'vault-key-bar', seg: 'vkb-', lbl: 'vault-key-lbl' });
 }
 
 function retestCrypto() {
-    ['st-webcrypto', 'st-chacha', 'st-aes', 'st-twofish'].forEach(function(id) {
-        var el = document.getElementById(id);
-        if (!el) return;
-        el.className = 'selftest-status loading';
-        el.textContent = '…';
-        el.title = '';
-    });
-    var banner = document.getElementById('selftest-banner');
-    if (banner) { banner.className = ''; banner.textContent = '… Running tests'; }
+    _resetSelftestChips();
     runCryptoSelfTest();
 }
 
 // ============================================================
 // Keyboard shortcuts (Escape / double-Escape lock)
 // ============================================================
+
+// Full lock-and-clear: wipes key fields + caches, hides all decoded data, closes
+// any open modal, and toasts "Locked". Shared by double-Escape and the X hotkey.
+function _lockAndClearVault() {
+    _resetKeyFields();
+    _mkCache.clear();
+    _terminateArgonPool();
+    clearDisplay();
+    _editRecord = null;
+    document.getElementById('newentry').style.display         = 'none';
+    document.getElementById('passwordSettings').style.display = 'none';
+    document.getElementById('newentry-title').textContent     = 'New Entry';
+    _clearClipboardIfDirty();
+    _relockV5Entries();
+    if (document.getElementById('about-overlay').classList.contains('open')) closeAbout();
+    if (document.getElementById('search-overlay').classList.contains('open')) hideSearch();
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+    showToast('Locked');
+}
 
 var _lastEscTime = 0;
 document.addEventListener('keydown', function(e) {
@@ -3742,20 +4516,7 @@ document.addEventListener('keydown', function(e) {
     if (now - _lastEscTime < 400) {
         // Double rapid Escape — lock and clear everything
         _lastEscTime = 0;
-        _resetKeyFields();
-        _mkCache.clear();
-        _terminateArgonPool();
-        clearDisplay();
-        _editRecord = null;
-        document.getElementById('newentry').style.display         = 'none';
-        document.getElementById('passwordSettings').style.display = 'none';
-        document.getElementById('newentry-title').textContent     = 'New Entry';
-        _clearClipboardIfDirty();
-        _relockV5Entries();
-        if (document.getElementById('about-overlay').classList.contains('open')) closeAbout();
-        if (document.getElementById('search-overlay').classList.contains('open')) hideSearch();
-        window.scrollTo({ top: 0, behavior: 'smooth' });
-        showToast('Locked');
+        _lockAndClearVault();
         return;
     }
     _lastEscTime = now;
@@ -3770,6 +4531,74 @@ document.addEventListener('keydown', function(e) {
         clearDisplay();
     }
     window.scrollTo({ top: 0, behavior: 'smooth' });
+});
+
+// Global single-key shortcuts. Suppressed while typing (any input/textarea/select/
+// contenteditable), while a Ctrl/Cmd/Alt modifier is held (so Cmd+N, select-all,
+// etc. stay native; Shift is allowed since '?' needs it), and while the About modal
+// is open (Escape closes it). The search overlay needs no special-case — it keeps
+// focus in #search-input, so the typing guard already bails while it's open.
+function _isShortcutBlocked(e) {
+    if (e.ctrlKey || e.metaKey || e.altKey) return true;
+    var t = document.activeElement;
+    if (t && (/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName) || t.isContentEditable)) return true;
+    if (document.getElementById('about-overlay').classList.contains('open')) return true;
+    return false;
+}
+
+document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') return;          // handled by the listener above
+    if (_isShortcutBlocked(e)) return;
+    switch (e.key === '?' ? '?' : e.key.toLowerCase()) {
+        case '?':
+            e.preventDefault();
+            toggleSearch();
+            break;
+        case 'n': {
+            var nb = document.querySelector('[data-action="new-entry"]');
+            if (nb && !nb.disabled) { e.preventDefault(); newEntry(nb); }
+            break;
+        }
+        case 'c': {
+            e.preventDefault();
+            var cb = document.querySelector('[data-action="clear-display"]');
+            if (cb) blinkTD(cb);
+            clearDisplay();
+            _editRecord = null;
+            break;
+        }
+        case 'x': {
+            e.preventDefault();
+            var xb = document.querySelector('[data-action="clear-lines"]');
+            if (xb) blinkTD(xb);
+            _lockAndClearVault();
+            break;
+        }
+        case 'e': {
+            // Edit the currently selected (decoded) entry, if any.
+            if (deleteEntryRecord === null) break;
+            e.preventDefault();
+            var eb = document.querySelector('[data-action="edit-entry"]');
+            if (eb) blinkTD(eb);
+            editEntry();
+            break;
+        }
+        case 'd': {
+            // Delete the currently selected entry (deleteEntry() confirms first).
+            // Requires Shift to avoid an accidental single-key delete.
+            if (!e.shiftKey || deleteEntryRecord === null) break;
+            e.preventDefault();
+            var db = document.querySelector('[data-action="delete-entry"]');
+            if (db) blinkTD(db);
+            deleteEntry();
+            break;
+        }
+        case 'i':
+        case 'a':
+            e.preventDefault();
+            openAbout();
+            break;
+    }
 });
 
 // ============================================================
@@ -3869,9 +4698,13 @@ var _clickActions = {
     'close-about':       function(el) { closeAbout(); },
     'retest-crypto':     function(el) { retestCrypto(); },
     'export-vault':      function(el) { exportVault(); },
+    'import-vault':      function(el) { _importVaultClick(); },
     'audit-vault':       function(el) { auditVault(); },
     'toggle-chpw':       function(el) { toggleChangePw(); },
+    'toggle-chpw-show':  function(el) { toggleChpwShow(el); },
     'do-chpw':           function(el) { changeMasterPasswords(); },
+    'toggle-kdf':        function(el) { toggleChangeKdf(); },
+    'do-kdf':            function(el) { changeKdfParams(); },
     'resign-vault':      function(el) { resignVault(); }
 };
 
@@ -3900,10 +4733,29 @@ function _bindStaticHandlers() {
     var pw = document.getElementById('password');
     if (pw) pw.addEventListener('input', updatePWStrength);
 
+    ['newpw1', 'newpw1c', 'newpw2', 'newpw2c'].forEach(function(id) {
+        var el = document.getElementById(id);
+        if (el) el.addEventListener('input', function() {
+            updateChpwStrength();
+            updateChpwMatch();
+        });
+    });
+
     var notes = document.getElementById('notes');
     if (notes) notes.addEventListener('input', function() {
         notes.style.height = 'auto';
         notes.style.height = notes.scrollHeight + 'px';
+    });
+
+    // Change KDF Parameters: the 5-step slider drives the mem/iterations inputs
+    // from the preset table; typing in either input snaps the slider to match.
+    var kdfSlider = document.getElementById('kdf-slider');
+    if (kdfSlider) kdfSlider.addEventListener('input', function() {
+        _kdfSliderApply(parseInt(kdfSlider.value, 10) || 2);
+    });
+    ['kdf-mem', 'kdf-time'].forEach(function(id) {
+        var el = document.getElementById(id);
+        if (el) el.addEventListener('input', _kdfSyncSlider);
     });
 
     // Master-key field: Tab/Enter clears + jumps to the 2nd key.
@@ -3955,12 +4807,20 @@ function _bindStaticHandlers() {
 document.addEventListener('DOMContentLoaded', function() {
     _bindStaticHandlers();
 
+    // (_updateVaultKeyBar is bound to both key fields' `input` in
+    // _bindStaticHandlers; here we only add the reveal/relock behaviour.)
     var k1 = document.getElementById('aeskey');
     var k2 = document.getElementById('aeskey2');
-    if (k1) { k1.addEventListener('input', _relockV5Entries); k1.addEventListener('input', _updateVaultKeyBar); }
+    // Stop an in-flight name-decode if the user changes focus back to a key input
+    // or edits its value (an edit already routes through _relockV5Entries below,
+    // which aborts; the focus handlers cover a plain refocus with no edit).
+    if (k1) {
+        k1.addEventListener('input', _relockV5Entries);
+        k1.addEventListener('focus', _abortReveal);
+    }
     if (k2) {
         k2.addEventListener('input', _relockV5Entries);
-        k2.addEventListener('input', _updateVaultKeyBar);
+        k2.addEventListener('focus', _abortReveal);
         k2.addEventListener('blur', function() {
             var pw  = k1 ? k1.value : '';
             var pw2 = k2.value;
@@ -3976,6 +4836,11 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     // Page-load init sequence (formerly the inline <script> at the end of body).
+    // Read the active vault-wide Argon2id params from the embedded #vault-kdf span
+    // FIRST — every key derivation below depends on it, and the read-only/offline
+    // copy has only this embedded value (no server to query).
+    _initVaultKdf();
+    _initAboutTooltips();
     initCharsets();
     initCrypto();
     runPageLoadSelfTest();
@@ -3984,6 +4849,10 @@ document.addEventListener('DOMContentLoaded', function() {
     var copyBtn = document.getElementById('copy-button');
     if (copyBtn) copyBtn.disabled = true;
     resizeFreezePane();
+    window.addEventListener('resize', function () {
+        if (_rfpRAF) cancelAnimationFrame(_rfpRAF);
+        _rfpRAF = requestAnimationFrame(resizeFreezePane);
+    });
     _initEntries();
     // Pick up the integrity manifest embedded by post.php (verified on unlock).
     var mEl = document.getElementById('vault-manifest');
