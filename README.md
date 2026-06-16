@@ -31,12 +31,12 @@ The vault is a single page served by any PHP-capable web server. Unlocking it ta
 
 **At a glance:**
 
-- 🔐 **Client-side encryption only** — AES-256-GCM, ChaCha20-Poly1305, Twofish-256-CTR, and Serpent-256-CTR layered in series, with keys derived by Argon2id (64 MiB memory-hard) and expanded via HKDF-SHA-256
+- 🔐 **Client-side encryption only** — AES-256-GCM, ChaCha20-Poly1305, Twofish-256-CTR, and Serpent-256-CTR layered in series, with keys derived by Argon2id (memory-hard; 128 MiB default, tunable per vault) and expanded via HKDF-SHA-256; payloads are length-padded so ciphertext size doesn't leak secret length
 - 🕶 **Encrypted entry names** — the stored database leaks no metadata; the entry grid shows 🔒 placeholders until both passwords are entered
 - 🔢 **Built-in 2FA (TOTP)** — stores authenticator secrets and shows live 6-digit codes with a countdown ring; import secrets by scanning a QR code
 - 🎲 **Password generator** — configurable character sets, length- or entropy-targeted, with a live strength meter
 - 📊 **Vault-key strength indicator** — a combined strength bar for both master passwords updates live as you type; the ＋ New button is disabled (labeled **"Too Weak"**) until the combined entropy exceeds 45 bits, blocking new entries under trivially guessable keys
-- 🧰 **Vault tools** — one-click encrypted export, a local-only password audit (reused / weak / empty), whole-vault master-password rotation, and integrity signing
+- 🧰 **Vault tools** — one-click encrypted export and import/restore (atomic whole-vault replace, verified-readable before commit), a local-only password audit (reused / weak / empty), whole-vault master-password rotation, a tunable Argon2id work factor (re-encrypts the vault at a new memory/iteration cost), and integrity signing
 - 🔏 **Integrity manifest** — a keyed HMAC-SHA-256 over the entire record set (signed under both master passwords) is verified on every unlock; tampering, corruption, and rolled-back copies are detected with a badge above the entry list
 - 🔍 **Live search**, ✏ **edit**, 🗑 **delete**, and instant in-place grid updates — no page reloads
 - ⏱ **Auto-lock** after 5 minutes idle (with a 60-second warning), instant lock on double-Escape, and **clipboard auto-clear** 45 seconds after copying a secret
@@ -51,8 +51,8 @@ The vault is a single page served by any PHP-capable web server. Unlocking it ta
 ## How it works
 
 ```
-plaintext JSON ──▶ ChaCha20-Poly1305 ──▶ AES-256-GCM ──▶ Twofish-256-CTR ──▶ Serpent-256-CTR ──▶ stored hex
-                   (password 1, AEAD)     (password 1, AEAD)  (password 2)        (password 2)
+plaintext JSON ──▶ pad to 256 B ──▶ ChaCha20-Poly1305 ──▶ AES-256-GCM ──▶ Twofish-256-CTR ──▶ Serpent-256-CTR ──▶ stored hex
+                                     (password 1, AEAD)     (password 1, AEAD)  (password 2)        (password 2)
 ```
 
 - Each record carries two random 32-byte salts. From these, **Argon2id** (m = 128 MiB, t = 3, p = 1 by default) derives one master key per password, and **HKDF-SHA-256** expands each into independent per-cipher subkeys — so the expensive memory-hard step runs only twice per record while every layer still gets its own key. The Argon2id cost is **vault-wide and tunable** (see [*Vault tools*](#vault-tools)): it lives in the `kdfparams` file (and is embedded in the page), so changing it re-encrypts the whole vault atomically and the read-only/offline copy still derives keys at the right cost.
