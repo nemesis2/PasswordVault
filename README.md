@@ -6,6 +6,19 @@ No accounts, no cloud, no JavaScript framework, no database server, no runtime d
 
 ---
 
+## Screen Shots
+
+### Main Body
+![Screenshot](/images/vault-screenshot-1.jpg "Vault Screenshot")
+
+### New Entry 
+![Screenshot](/images/vault-screenshot-2.jpg "Vault Screenshot")
+
+### About
+![Screenshot](/images/vault-screenshot-3.jpg "Vault Screenshot")
+
+---
+
 ## Overview
 
 The vault is a single page served by any PHP-capable web server. Unlocking it takes **two independent master passwords** — both are required to decrypt anything; either one alone reveals nothing, not even entry names.
