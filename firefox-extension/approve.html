@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Vault Passkey</title>
+    <style>
+      :root { color-scheme: dark; }
+      body {
+        margin: 0; padding: 18px 20px; width: 360px; box-sizing: border-box;
+        font: 14px/1.45 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+        background: #111318; color: #e6e8ec;
+      }
+      h1 { font-size: 16px; margin: 0 0 4px; }
+      .rp { color: #3fcf8e; font-weight: 600; word-break: break-all; }
+      p.sub { margin: 4px 0 4px; color: #9aa0aa; font-size: 13px; }
+      p.origin { margin: 0 0 14px; font-size: 12px; color: #9aa0aa; word-break: break-all; }
+      p.origin .o { color: #e6e8ec; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+      label { display: block; margin: 10px 0 4px; font-size: 12px; color: #9aa0aa; }
+      input {
+        width: 100%; box-sizing: border-box; padding: 8px 10px; border-radius: 8px;
+        border: 1px solid #2a2f3a; background: #1a1d24; color: #e6e8ec; font-size: 14px;
+      }
+      input:focus { outline: none; border-color: #4d8eff; }
+      .row { display: flex; gap: 8px; margin-top: 16px; }
+      button {
+        flex: 1; padding: 9px 12px; border-radius: 8px; border: 0; cursor: pointer;
+        font-size: 14px; font-weight: 600;
+      }
+      .allow { background: #3fcf8e; color: #07120c; }
+      .deny { background: #2a2f3a; color: #e6e8ec; }
+      .status { margin-top: 10px; min-height: 16px; font-size: 12px; color: #ff6b6b; }
+      .hint { font-size: 11px; color: #6b7280; margin-top: 2px; }
+      #attach-status { color: #9aa0aa; margin: 0 0 6px; }
+      #attach-list {
+        max-height: 180px; overflow: auto; border: 1px solid #2a2f3a; border-radius: 8px;
+      }
+      .ar {
+        display: flex; align-items: center; gap: 8px; padding: 7px 9px; cursor: pointer;
+        border-bottom: 1px solid #20242d;
+      }
+      .ar:last-child { border-bottom: 0; }
+      .ar:hover { background: #1a1d24; }
+      .ar input { width: auto; margin: 0; }
+      .ar.disabled { opacity: 0.5; cursor: not-allowed; }
+      .ar .an { font-size: 13px; color: #e6e8ec; }
+      .ar .au { font-size: 11px; color: #9aa0aa; word-break: break-all; }
+      .ar .amatch { color: #3fcf8e; }
+      .ar .apk { color: #6b7280; }
+    </style>
+  </head>
+  <body>
+    <h1 id="title">Passkey request</h1>
+    <p class="sub">for <span class="rp" id="rp">…</span></p>
+    <p class="origin">Requested by <span class="o" id="origin">…</span></p>
+
+    <div id="form">
+      <label for="pw1">Master password 1</label>
+      <input type="password" id="pw1" autocomplete="off" />
+      <label for="pw2">Master password 2</label>
+      <input type="password" id="pw2" autocomplete="off" />
+
+      <div id="write-block">
+        <label for="wuser">Vault write username</label>
+        <input type="text" id="wuser" autocomplete="off" />
+        <label for="wpass">Vault write password</label>
+        <input type="password" id="wpass" autocomplete="off" />
+        <div class="hint">Authorizes saving the new passkey to the vault. Not stored.</div>
+      </div>
+
+      <div id="attach-block" style="display:none;margin-top:14px;">
+        <p id="attach-status"></p>
+        <input type="text" id="attach-search" placeholder="Search entries…" autocomplete="off"
+               style="display:none;margin-bottom:6px;" />
+        <div id="attach-list"></div>
+      </div>
+
+      <div class="row">
+        <button class="deny" id="deny">Deny</button>
+        <button class="allow" id="allow">Allow</button>
+      </div>
+      <button class="deny" id="use-native" style="width:100%;margin-top:8px;display:none;">
+        Use this device instead
+      </button>
+      <div class="status" id="status"></div>
+    </div>
+
+    <script src="approve.js"></script>
+  </body>
+</html>

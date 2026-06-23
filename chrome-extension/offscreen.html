@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Vault session</title>
+  </head>
+  <body>
+    <!--
+      Offscreen document — the MV3 stand-in for Firefox's persistent background
+      page. A Chrome service worker is ephemeral (killed when idle) and cannot
+      spawn Web Workers, so the unlocked vault session, the Argon2id worker pool,
+      the v6 decrypt path, DOMParser, and clipboard wiping all live here instead.
+      This page is created once by background.js and never closed while the
+      browser runs, so the decrypted entries survive the popup (and the service
+      worker) closing — exactly like the Firefox background page.
+    -->
+    <script src="crypto-ciphers.js"></script>
+    <script src="crypto-vault.js"></script>
+    <script src="webauthn.js"></script>
+    <script src="offscreen.js"></script>
+  </body>
+</html>

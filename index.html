@@ -5,6 +5,7 @@
 <title>Password Vault</title>
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, minimum-scale=1"/>
 <meta name="theme-color" content="#111318">
+<link rel="manifest" href="manifest.json">
 <script src="javascript.js"></script>
 <style>
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -21,6 +22,7 @@
   --text-3:      #4d5168;
   --accent:      #4d8eff;
   --accent-h:    #6ba3ff;
+  --accent-rgb:  77,142,255;
   --danger:      #ff5c5c;
   --danger-h:    #ff7a7a;
   --danger-rgb:  255,92,92;
@@ -31,6 +33,38 @@
   --mono:        'SF Mono','Cascadia Code','Fira Mono',Consolas,monospace;
   --r:           6px;
   --shadow:      0 8px 24px rgba(0,0,0,.5);
+  color-scheme:  dark;
+}
+
+/* Light theme — re-defines the palette variables; everything else is already
+   var()-driven so the whole UI follows. Toggled via html.theme-light by the
+   Appearance toggle (persisted per-instance in localStorage). The class lives on
+   the root <html> (not <body>) so the override reaches html { background } too —
+   body is centered (max-width + margin auto), and a var override on <body> would
+   not propagate up to its parent <html>, leaving the strips flanking the centered
+   body dark in a wide (e.g. PWA) window. */
+html.theme-light {
+  --bg:          #f4f5f8;
+  --surface:     #ffffff;
+  --card:        #ffffff;
+  --elevated:    #eef0f5;
+  --border:      #d9dce6;
+  --border-2:    #c2c7d6;
+  --text:        #1b1f2e;
+  --text-2:      #5a6076;
+  --text-3:      #9aa0b4;
+  --accent:      #2563eb;
+  --accent-h:    #1d4ed8;
+  --accent-rgb:  37,99,235;
+  --danger:      #dc2626;
+  --danger-h:    #b91c1c;
+  --danger-rgb:  220,38,38;
+  --green:       #0f9d6b;
+  --green-rgb:   15,157,107;
+  --warn:        #b8730a;
+  --warn-rgb:    184,115,10;
+  --shadow:      0 8px 24px rgba(20,30,60,.15);
+  color-scheme:  light;
 }
 
 /* overflow-anchor: the browser's automatic scroll anchoring would also
@@ -52,6 +86,11 @@ body {
   scrollbar-color: var(--elevated) var(--bg);
   scrollbar-width: thin;
 }
+/* Locks page scroll while a full-screen overlay (e.g. the About modal) is open.
+   Without this, a wheel/touch scroll over the overlay's dimmed backdrop — which
+   has no scroll container of its own — bubbles up and scrolls the page behind
+   the overlay instead of being absorbed by it. */
+body.modal-open { overflow: hidden; }
 ::-webkit-scrollbar { width: 6px; }
 ::-webkit-scrollbar-track { background: var(--bg); }
 ::-webkit-scrollbar-thumb { background: var(--elevated); border-radius: 3px; }
@@ -102,6 +141,10 @@ body {
   border-radius: var(--r);
   transition: color .15s, background .15s;
   line-height: 1;
+  /* Pull right by the button's own 5px right padding so the trash glyph sits
+     flush at the row's content edge — vertically aligned with the token and
+     password copy glyphs below it (which have no padding). */
+  margin-right: -5px;
 }
 .del-btn:hover { color: var(--danger); background: rgba(255,92,92,.1); }
 
@@ -116,15 +159,33 @@ body {
   transition: color .15s, background .15s;
   line-height: 1;
 }
-.edit-btn:hover { color: var(--accent); background: rgba(77,142,255,.1); }
+.edit-btn:hover { color: var(--accent); background: rgba(var(--accent-rgb),.1); }
 
 .field {
   flex: 1;
   min-width: 0;
   cursor: pointer;
   user-select: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
+.field-text { flex: 1; min-width: 0; }
 .field:hover .fval { color: var(--accent); }
+
+/* Affordance-only copy glyph — purely visual; clicks fall through
+   (pointer-events:none) to the row's own copy-* data-action handler. */
+.copy-glyph {
+  flex-shrink: 0;
+  color: var(--text-2);
+  font-size: 14px;
+  line-height: 1;
+  opacity: .4;
+  pointer-events: none;
+  transition: color .15s, opacity .15s;
+}
+.field:hover .copy-glyph,
+.otp-col:hover .copy-glyph { color: var(--accent); opacity: 1; }
 
 .flbl {
   font-size: 10px;
@@ -147,13 +208,30 @@ body {
   transition: color .15s;
 }
 
+/* Clickable tag chips in the decode panel — each opens the search popup
+   scoped to that tag (#tag). */
+.dec-tag {
+  cursor: pointer;
+  transition: color .15s;
+}
+.dec-tag:hover { color: var(--accent); text-decoration: underline; }
+
 .otp-col {
   flex-shrink: 0;
   min-width: 108px;
   cursor: pointer;
   user-select: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
+.otp-text { flex: 1; min-width: 0; }
 .otp-col:hover #otp { color: var(--accent-h); }
+/* Created column — same fixed width as the token column above it. */
+.created-col { flex-shrink: 0; min-width: 108px; }
+/* Nudge the username/password glyph left so it doesn't crowd the right column. */
+[data-action="copy-username"] .copy-glyph,
+[data-action="copy-password"] .copy-glyph { margin-right: 15px; }
 .otp-lbl {
   font-size: 10px;
   font-weight: 600;
@@ -301,6 +379,24 @@ body:not(.wide-controls) #content {
   gap: 8px;
 }
 
+/* First-letter group header — spans the full grid row (forcing a new row) and
+   sticks just below the fixed decode panel (offset via --sticky-top, set by
+   resizeFreezePane). Opaque background so scrolling buttons don't show through. */
+.entry-group-hdr {
+  grid-column: 1 / -1;
+  position: sticky;
+  top: var(--sticky-top, 0px);
+  z-index: 2;
+  color: var(--green);
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: uppercase;
+  padding: 6px 2px 4px;
+  margin-top: 2px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+}
+
 /* ─── Wide-viewport mode ──────────────────────────────────────
    Narrow/mobile (base rules above): capped 480px, centered, 2 cols.
    At >=560px (where a 3rd 160px tile first fits) the page goes
@@ -371,11 +467,27 @@ body.wide-controls .ctrl-form #entry-count-row {
   box-shadow: 0 4px 12px rgba(0,0,0,.28);
 }
 .entry-btn:active { transform: translateY(0); box-shadow: none; }
+/* Entry monogram avatars — CSP-safe local "favicons" (a colored first-letter
+   circle; color is a stable hash of the entry name). The label becomes its own
+   flex item so ellipsis truncation still works. */
+.entry-grid .entry-btn { display: flex; align-items: center; gap: 8px; }
+.entry-grid .entry-lbl {
+  flex: 1; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.entry-avatar {
+  flex: 0 0 auto;
+  width: 20px; height: 20px;
+  border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 11px; font-weight: 700; line-height: 1;
+  color: #fff; text-transform: uppercase;
+}
 .entry-btn.selected {
   background: var(--elevated);
   border-color: var(--accent);
   color: var(--accent);
-  box-shadow: 0 0 0 1px var(--accent), 0 4px 14px rgba(77,142,255,.18);
+  box-shadow: 0 0 0 1px var(--accent), 0 4px 14px rgba(var(--accent-rgb),.18);
   transform: none;
   transition: none;
 }
@@ -509,8 +621,63 @@ body.wide-controls .ctrl-form #entry-count-row {
 }
 #charset { display: contents; }
 .gen-grid label { cursor: pointer; }
-.gen-grid input[type=checkbox],
-.gen-grid input[type=radio] { accent-color: var(--accent); cursor: pointer; }
+
+/* ─── Dark-theme checkboxes & radios ──────────────────────────
+   Custom-drawn (appearance:none) so the box/border/fill all follow
+   the palette — native controls render light even with accent-color. */
+input[type=checkbox],
+input[type=radio] {
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  box-sizing: border-box;
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  flex: 0 0 auto;
+  vertical-align: middle;
+  background: var(--elevated);
+  border: 1px solid var(--border-2);
+  cursor: pointer;
+  position: relative;
+  transition: background .12s ease, border-color .12s ease;
+}
+input[type=checkbox] { border-radius: 3px; }
+input[type=radio]    { border-radius: 50%; }
+input[type=checkbox]:hover,
+input[type=radio]:hover { border-color: var(--accent); }
+input[type=checkbox]:checked,
+input[type=radio]:checked {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+input[type=checkbox]:checked::before,
+input[type=checkbox]:checked::after {        /* X — two crossing strokes */
+  content: '';
+  position: absolute;
+  left: 50%; top: 50%;
+  width: 2px; height: 9px;
+  border-radius: 1px;
+  background: #fff;
+}
+input[type=checkbox]:checked::before { transform: translate(-50%, -50%) rotate(45deg); }
+input[type=checkbox]:checked::after  { transform: translate(-50%, -50%) rotate(-45deg); }
+input[type=radio]:checked::after {           /* center dot */
+  content: '';
+  position: absolute;
+  left: 50%; top: 50%;
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: #fff;
+  transform: translate(-50%, -50%);
+}
+input[type=checkbox]:focus-visible,
+input[type=radio]:focus-visible {
+  outline: 2px solid var(--accent-h);
+  outline-offset: 1px;
+}
+input[type=checkbox]:disabled,
+input[type=radio]:disabled { opacity: .45; cursor: default; }
 .gen-grid .sym-chars { font-family: monospace; font-size: 11px; opacity: 0.7; letter-spacing: 1px; }
 #customchars {
   background: var(--elevated);
@@ -571,11 +738,24 @@ body.wide-controls .ctrl-form #entry-count-row {
   opacity: 1;
   transform: translateX(-50%) translateY(0);
 }
+/* Actionable toast (e.g. Undo) — re-enable clicks the base toast suppresses. */
+#toast.actionable { pointer-events: auto; }
+#toast .toast-action {
+  margin-left: 12px;
+  background: none;
+  border: none;
+  color: var(--accent);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 0;
+}
+#toast .toast-action:hover { color: var(--accent-h); }
 
 /* ─── Button click flash ──────────────────────────────────── */
 @keyframes btn-blink {
-    0%   { box-shadow: 0 0 0 3px rgba(77,142,255,.5), 0 0 12px rgba(77,142,255,.25); }
-    100% { box-shadow: 0 0 0 0   rgba(77,142,255,0);                                  }
+    0%   { box-shadow: 0 0 0 3px rgba(var(--accent-rgb),.5), 0 0 12px rgba(var(--accent-rgb),.25); }
+    100% { box-shadow: 0 0 0 0   rgba(var(--accent-rgb),0);                                  }
 }
 .btn-flash            { animation: btn-blink   500ms ease-out forwards; }
 .entry-btn.btn-flash  { animation: none; }
@@ -586,7 +766,7 @@ body.wide-controls .ctrl-form #entry-count-row {
 
 /* ─── Copy flash on field/token click ────────────────────── */
 @keyframes field-flash {
-  0%   { background: rgba(77,142,255,.18); border-radius: 4px; }
+  0%   { background: rgba(var(--accent-rgb),.18); border-radius: 4px; }
   100% { background: transparent; }
 }
 .copy-flash { animation: field-flash 600ms ease-out forwards; }
@@ -594,7 +774,9 @@ body.wide-controls .ctrl-form #entry-count-row {
 /* ─── Entry count + integrity badge (same line) ──────────── */
 #entry-count-row {
   display: flex;
-  align-items: baseline;
+  flex-wrap: wrap;
+  align-items: center;
+  row-gap: 4px;
   margin-bottom: 6px;
 }
 #vault-integrity {
@@ -605,6 +787,27 @@ body.wide-controls .ctrl-form #entry-count-row {
   font-size: 11px;
   color: var(--text-2);
   white-space: nowrap;
+}
+#autolock-row {
+  flex: 0 0 100%;          /* own line, below the entry count */
+  display: flex;
+  align-items: center;
+}
+#autolock-status {
+  font-size: 11px;
+  color: var(--danger);
+  white-space: nowrap;
+}
+#group-toggle-lbl {
+  font-size: 11px;
+  color: var(--text-2);
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  user-select: none;
+  margin-left: auto;       /* right-aligned within #autolock-row */
 }
 #worker-count {
   font-size: 11px;
@@ -664,21 +867,62 @@ body.wide-controls .ctrl-form #entry-count-row {
   font-size: 11px;
   color: var(--text-2);
   padding: 4px 14px;
-  text-align: right;
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
   min-height: 0;
   line-height: 1.4;
+  flex: 0 0 auto;
+  /* Opaque bar above the scrolling results — sits over the sticky group
+     headers (z-index:2) so scrolled buttons never peek out behind the text. */
+  background: var(--surface);
+  position: relative;
+  z-index: 3;
 }
 #search-count:empty { display: none; }
+#search-count .search-scope { text-align: left; }
 #search-results {
+  flex: 1 1 auto;
+  min-height: 0;                  /* allow the flex item to shrink so it scrolls */
   overflow-y: auto;
+  overscroll-behavior: contain;   /* don't chain the scroll to the page behind */
   scrollbar-color: var(--elevated) var(--surface);
   scrollbar-width: thin;
-  padding: 8px;
+  /* No top padding: the sticky group header pins at top:0 (the padding edge),
+     so a top padding would leave a strip above it where scrolled buttons peek
+     out. Use margin-top for the gap instead — margins don't render overflow. */
+  margin-top: 8px;
+  padding: 0 8px 8px;
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 6px;
 }
+/* Vertically center the label and give each result a consistent height — the
+   shared .entry-btn rules rely on grid row-stretch in the main grid, which the
+   denser results list doesn't reproduce. Label is its own flex item so the
+   ellipsis truncation still works. */
+#search-results .entry-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+}
+#search-results .entry-btn-lbl {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 #search-results::-webkit-scrollbar-track { background: var(--surface); }
+/* Inside the search popup the list is its own scroll container, so group
+   headers stick to its top — not the global --sticky-top (fixed-panel) offset
+   used by the main grid, which would push them down over the buttons. */
+#search-results .entry-group-hdr {
+  top: 0;
+  background: var(--surface);
+}
 #search-no-match {
   grid-column: 1 / -1;
   color: var(--text-2);
@@ -756,6 +1000,7 @@ body.wide-controls .ctrl-form #entry-count-row {
 #about-btn[data-tip]::after { left: auto; right: 0; transform: none; }
 [data-action="export-vault"][data-tip]::after { left: 0; transform: none; }
 [data-action="resign-vault"][data-tip]::after { left: auto; right: 0; transform: none; }
+#decmodified-col[data-tip]::after { left: auto; right: 0; transform: none; }
 
 /* About-modal tooltips can't use the ::after technique: #about-body is a scroll
    container (overflow-y:auto forces overflow-x:auto) and #about-box is
@@ -804,7 +1049,7 @@ body.wide-controls .ctrl-form #entry-count-row {
   border-radius: var(--r);
   box-shadow: 0 12px 40px rgba(0,0,0,.7);
   width: 100%;
-  max-width: 600px;
+  max-width: 920px;
   max-height: 82vh;
   display: flex;
   flex-direction: column;
@@ -839,6 +1084,7 @@ body.wide-controls .ctrl-form #entry-count-row {
 #about-close:hover { color: var(--text); background: var(--elevated); }
 #about-body {
   overflow-y: auto;
+  overscroll-behavior: contain;   /* don't chain the scroll to the page behind */
   padding: 14px 16px;
   font-size: 12.5px;
   line-height: 1.65;
@@ -857,7 +1103,7 @@ body.wide-controls .ctrl-form #entry-count-row {
 }
 .about-section:last-child { margin-bottom: 0; border-bottom: none; padding-bottom: 0; }
 .about-section h3 {
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: .08em;
@@ -926,6 +1172,173 @@ body.wide-controls .ctrl-form #entry-count-row {
 .audit-ok   { color: var(--green); }
 .audit-bad  { color: var(--danger); }
 .audit-warn { color: var(--warn); }
+
+/* ─── Passkeys inventory panel ─────────────────────────────── */
+#passkey-result {
+  margin-top: 10px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 8px 10px;
+  font-size: 12px;
+}
+.pk-hdr {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+  font-weight: 600;
+}
+.pk-hdr-icon { color: var(--green); }
+.pk-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+}
+.pk-row:last-child { border-bottom: none; }
+.pk-info { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.pk-name {
+  font-weight: 500;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.pk-meta { color: var(--text-2); font-size: 11px; }
+
+/* ─── Trash (soft delete) list ─────────────────────────────── */
+#trash-result {
+  margin-top: 10px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 8px 10px;
+  font-size: 12px;
+}
+.trash-hdr {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+  font-weight: 600;
+}
+.trash-hdr .btn { font-size: 12px; padding: 5px 9px; }
+.trash-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+}
+.trash-row:last-child { border-bottom: none; }
+.trash-info { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.trash-name {
+  font-weight: 500;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.trash-date { color: var(--text-2); font-size: 11px; }
+.trash-del { color: var(--danger); }
+.trash-del:hover { background: rgba(var(--danger-rgb),.12); }
+
+/* ─── Favorite star (decode panel + entry buttons) ─────────── */
+.fav-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-2);
+  font-size: 16px;
+  padding: 3px 5px;
+  border-radius: var(--r);
+  transition: color .15s, background .15s;
+  line-height: 1;
+}
+.fav-btn:hover    { color: var(--warn); background: rgba(var(--warn-rgb),.1); }
+.fav-btn.is-fav   { color: var(--warn); }
+.entry-btn.entry-fav::before { content: '\2605'; color: var(--warn); margin-right: 5px; }
+.entry-btn.entry-passkey .entry-lbl::after { content: '\1F510'; margin-left: 6px; opacity: .85; }
+.entry-btn.entry-note .entry-lbl::after { content: '\1F4DD'; margin-left: 6px; opacity: .8; }
+
+/* ─── Entry type toggle (entry form) ──────────────────────── */
+.type-toggle { display: flex; gap: 6px; flex: 1; min-width: 0; }
+.type-opt {
+  background: var(--card); border: 1px solid var(--border); border-radius: var(--r);
+  color: var(--text-2); cursor: pointer; font-size: 12px; font-weight: 500;
+  font-family: inherit; padding: 5px 12px;
+  transition: background .15s, color .15s, border-color .15s;
+}
+.type-opt:hover { background: var(--elevated); color: var(--text); }
+.type-opt.is-on {
+  background: var(--elevated); color: var(--accent); border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+/* ─── Multi-select / bulk operations ──────────────────────── */
+#select-toggle {
+  font-size: 11px; color: var(--text-2);
+  background: none; border: none; cursor: pointer; font-family: inherit;
+  padding: 0; margin-left: auto;          /* right-aligned within #autolock-row */
+  white-space: nowrap;
+}
+#select-toggle:hover { color: var(--accent); }
+#select-toggle.is-on { color: var(--accent); }
+#group-toggle-lbl + #select-toggle,
+#select-toggle + #group-toggle-lbl { margin-left: 12px; }
+#bulk-bar {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+  padding: 8px 10px; margin-bottom: 8px;
+  background: var(--card); border: 1px solid var(--accent); border-radius: var(--r);
+}
+#bulk-count { font-size: 12px; color: var(--text); font-weight: 600; white-space: nowrap; }
+#bulk-bar .bulk-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-left: auto; }
+#bulk-bar .bulk-del:hover { background: rgba(var(--danger-rgb),.16); color: var(--danger); }
+#bulk-tag-row { flex: 0 0 100%; display: flex; gap: 6px; align-items: center; }
+#bulk-tag-input {
+  flex: 1; min-width: 0; background: var(--bg); border: 1px solid var(--border);
+  border-radius: var(--r); padding: 5px 8px;
+}
+/* In select mode the grid buttons toggle selection instead of decoding. */
+.entry-grid.select-mode .entry-btn { cursor: copy; }
+.entry-grid.select-mode .entry-btn:hover { transform: none; box-shadow: none; }
+.entry-btn.entry-selected {
+  background: var(--elevated);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent) inset;
+}
+.entry-btn.entry-selected::after {
+  content: '\2713'; margin-left: auto; padding-left: 8px;
+  color: var(--accent); font-weight: 700;
+}
+
+/* ─── Custom fields (entry form) ───────────────────────────── */
+.xf-wrap { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.xf-row { display: flex; gap: 6px; align-items: center; }
+.xf-row .xf-label { flex: 0 0 32%; min-width: 0; }
+.xf-row .xf-value { flex: 1; min-width: 0; }
+.xf-secret {
+  display: flex; align-items: center; gap: 3px;
+  font-size: 11px; color: var(--text-2); white-space: nowrap; cursor: pointer;
+}
+.xf-del { color: var(--danger); }
+.xf-add { align-self: flex-start; }
+
+/* ─── Custom fields + password history (decode panel) ──────── */
+#decextra { display: flex; flex-direction: column; gap: 6px; }
+.xf-dec { cursor: pointer; }
+.hist-toggle {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--accent);
+  font-size: 12px;
+  padding: 0;
+  font-weight: 500;
+}
+.hist-toggle:hover { color: var(--accent-h); }
+#dechistory { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
 #chpw-form {
   margin-top: 10px;
   background: var(--card);
@@ -968,6 +1381,8 @@ body.wide-controls .ctrl-form #entry-count-row {
 .chpw-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 8px; }
 .chpw-show { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-2); cursor: pointer; }
 .chpw-show input { cursor: pointer; }
+.about-check { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-2); cursor: pointer; margin-top: 8px; }
+.about-check input { cursor: pointer; }
 .chpw-actions { text-align: right; }
 #chpw-status { margin-top: 8px; font-size: 12px; color: var(--warn); min-height: 1em; }
 .kdf-slider-wrap { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; flex: 1; min-width: 0; }
@@ -1014,7 +1429,6 @@ body.wide-controls .ctrl-form #entry-count-row {
 .cr-table .cr-desc { color: var(--text-2); }
 .cr-aead { color: var(--green); font-size: 10px; font-weight: 700; letter-spacing: .04em; }
 .cr-ctr  { color: var(--text-3); font-size: 10px; font-weight: 700; letter-spacing: .04em; }
-.cr-kdf  { color: var(--warn);   font-size: 10px; font-weight: 700; letter-spacing: .04em; }
 
 /* KDF suggested-values chart */
 .kdf-table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 12px; }
@@ -1145,7 +1559,7 @@ kbd {
    the end so it layers cleanly over the component rules above. */
 
 /* Text selection — tinted to the accent instead of the OS default */
-::selection { background: rgba(77,142,255,.30); color: var(--text); }
+::selection { background: rgba(var(--accent-rgb),.30); color: var(--text); }
 
 /* Keyboard focus rings (pointer clicks stay clean via :focus-visible).
    One consistent accent halo across every interactive control. */
@@ -1163,7 +1577,7 @@ kbd {
   outline-offset: 2px;
   border-radius: var(--r);
 }
-.key-wrap:focus-within { box-shadow: 0 0 0 3px rgba(77,142,255,.14); }
+.key-wrap:focus-within { box-shadow: 0 0 0 3px rgba(var(--accent-rgb),.14); }
 /* Inputs show a visible focus state to match the key-wrap treatment.
    Bordered inputs get the soft accent ring; borderless inline fields
    (the new-entry rows and the search box) get an accent underline. */
@@ -1172,7 +1586,7 @@ kbd {
 .val-cell input[type=number]:focus {
   outline: none;
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(77,142,255,.14);
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb),.14);
 }
 .finput:focus,
 #search-input:focus {
@@ -1184,7 +1598,7 @@ kbd {
 .btn:active        { transform: translateY(1px); }
 .btn-sm:active     { transform: translateY(1px); }
 .btn-accent        { box-shadow: 0 1px 2px rgba(0,0,0,.25); }
-.btn-accent:hover  { box-shadow: 0 2px 10px rgba(77,142,255,.35); }
+.btn-accent:hover  { box-shadow: 0 2px 10px rgba(var(--accent-rgb),.35); }
 .btn-accent:active { box-shadow: 0 1px 2px rgba(0,0,0,.25); }
 .btn { transition: background .15s, color .15s, opacity .15s, box-shadow .15s, transform .08s ease; }
 .btn-sm { transition: background .15s, color .15s, transform .08s ease; }
@@ -1209,6 +1623,11 @@ kbd {
 /* The new-entry card and generator panel ease in when shown */
 #newentry, #passwordSettings { animation: pop-in .2s cubic-bezier(.16,.84,.44,1); }
 
+/* Cap the Edit/New Entry form and the generator panel at the same max-width as
+   the fixed display panel (#fixedDiv, 680px) so they don't fan out full-width on
+   wide viewports. */
+#newentry, #passwordSettings { max-width: 680px; }
+
 /* Honour reduced-motion preferences — disable transforms/animations */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
@@ -1228,42 +1647,84 @@ kbd {
 
   <div class="p-row">
     <div style="flex:1;min-width:0">
-      <span class="flbl">Name / URL</span>
+      <span class="flbl">&#x1F517;&#xFE0E; Name / URL</span>
       <span id="decname">&nbsp;</span>
     </div>
+    <button class="fav-btn" id="fav-btn" data-action="toggle-fav" aria-label="Toggle favorite" data-tip="Favorite (F)">&#x2606;</button>
     <button class="edit-btn" data-action="edit-entry" aria-label="Edit entry" data-tip="Edit entry (E)">&#x270F;&#xFE0E;</button>
     <button class="del-btn" data-action="delete-entry" aria-label="Delete entry" data-tip="Delete entry (Shift+D)">&#x1F5D1;&#xFE0E;</button>
   </div>
 
-  <div class="p-row">
+  <div class="p-row" id="decrow-user">
     <div class="field" data-action="copy-username" data-tip="Click to copy username">
-      <span class="flbl">Username</span>
-      <span class="fval" id="decusername">&nbsp;</span>
+      <div class="field-text">
+        <span class="flbl">&#x1F464;&#xFE0E; Username</span>
+        <span class="fval" id="decusername">&nbsp;</span>
+      </div>
+      <span class="copy-glyph" aria-hidden="true">&#x29C9;&#xFE0E;</span>
     </div>
     <div class="otp-col" data-action="copy-2fa" data-tip="Click to copy 2FA token">
-      <span class="otp-lbl">Token &nbsp;<span id="updatingIn">--</span>s</span>
-      <div class="otp-display">
-        <span id="otp">------</span>
-        <svg id="otp-ring" width="18" height="18" viewBox="0 0 20 20">
-          <circle cx="10" cy="10" r="8" fill="none" stroke="var(--border)" stroke-width="2.5"/>
-          <circle id="otp-arc" cx="10" cy="10" r="8" fill="none" stroke="var(--green)" stroke-width="2.5"
-                  stroke-linecap="round" stroke-dasharray="50.27" stroke-dashoffset="0"
-                  transform="rotate(-90 10 10)"/>
-        </svg>
+      <div class="otp-text">
+        <span class="otp-lbl">&#x23F1;&#xFE0E; Token &nbsp;<span id="updatingIn">--</span>s</span>
+        <div class="otp-display">
+          <span id="otp">------</span>
+          <svg id="otp-ring" width="18" height="18" viewBox="0 0 20 20">
+            <circle cx="10" cy="10" r="8" fill="none" stroke="var(--border)" stroke-width="2.5"/>
+            <circle id="otp-arc" cx="10" cy="10" r="8" fill="none" stroke="var(--green)" stroke-width="2.5"
+                    stroke-linecap="round" stroke-dasharray="50.27" stroke-dashoffset="0"
+                    transform="rotate(-90 10 10)"/>
+          </svg>
+        </div>
       </div>
+      <span class="copy-glyph" aria-hidden="true">&#x29C9;&#xFE0E;</span>
     </div>
   </div>
 
-  <div class="p-row" data-action="copy-password" style="cursor:pointer" data-tip="Click to copy password">
-    <div class="field">
-      <span class="flbl">Password</span>
-      <span class="fval" id="decpassword">&nbsp;</span>
+  <div class="p-row" id="decrow-pw">
+    <div class="field" data-action="copy-password" data-tip="Click to copy password">
+      <div class="field-text">
+        <span class="flbl">&#x1F511;&#xFE0E; Password</span>
+        <span class="fval" id="decpassword">&nbsp;</span>
+      </div>
+      <span class="copy-glyph" aria-hidden="true">&#x29C9;&#xFE0E;</span>
     </div>
+    <div class="created-col" id="decmodified-col">
+      <span class="flbl">&#x1F4DD;&#xFE0E; Modified</span>
+      <span class="fval" id="decmodified">&nbsp;</span>
+    </div>
+  </div>
+
+  <div class="p-row" id="dectags-row" style="display:none">
+    <div class="field">
+      <span class="flbl">&#x1F3F7;&#xFE0E; Tags</span>
+      <span class="fval" id="dectags">&nbsp;</span>
+    </div>
+  </div>
+
+  <div class="p-row" id="decextra-row" style="display:none">
+    <div id="decextra" style="flex:1;min-width:0"></div>
+  </div>
+
+  <div class="p-row" id="dechistory-row" style="display:none">
+    <div style="flex:1;min-width:0">
+      <button id="dechistory-toggle" class="hist-toggle" type="button" data-action="toggle-history">&#x23F1;&#xFE0E; Password history</button>
+      <div id="dechistory" style="display:none"></div>
+    </div>
+  </div>
+
+  <div class="p-row" id="decpasskey-row" style="display:none">
+    <div class="field" style="flex:1;min-width:0">
+      <div class="field-text">
+        <span class="flbl">&#x1F510;&#xFE0E; Passkey</span>
+        <span class="fval" id="decpasskey">&nbsp;</span>
+      </div>
+    </div>
+    <button class="del-btn" data-action="delete-passkey" aria-label="Delete passkey" data-tip="Delete passkey">&#x1F5D1;&#xFE0E;</button>
   </div>
 
   <div class="p-row" style="display:none">
     <div style="flex:1;min-width:0">
-      <span class="flbl">Notes</span>
+      <span class="flbl">&#x1F4DD;&#xFE0E; Notes</span>
       <textarea id="decnotes" rows="1" readonly placeholder="Notes"></textarea>
     </div>
   </div>
@@ -1295,6 +1756,7 @@ kbd {
     <div style="grid-column:2/4;display:flex;gap:6px">
       <button class="btn btn-ghost" data-action="clear-display" aria-label="Clear displayed entry" data-tip="Clear displayed entry (C)">C</button>
       <button class="btn btn-ghost" id="search-btn" data-action="toggle-search" aria-label="Search entries" data-tip="Search entries (?)">&#x1F50D;&#xFE0E;</button>
+      <button class="btn btn-ghost" id="theme-btn" data-action="toggle-theme" aria-label="Toggle light/dark theme" data-tip="Toggle light / dark theme">&#x1F319;&#xFE0E;</button>
       <button class="btn btn-ghost" id="about-btn" data-action="open-about" aria-label="About and crypto info" data-tip="About &amp; crypto info (A / I)">&#x2139;&#xFE0E;</button>
     </div>
   </form>
@@ -1315,10 +1777,35 @@ kbd {
     <div id="vault-integrity" style="display:none"></div>
     <div id="worker-count" style="display:none"></div>
     <div id="entry-count">-- entries</div>
+    <div id="autolock-row">
+      <div id="autolock-status" style="display:none">&#x26A0;&#xFE0E;&nbsp;Auto-locking disabled</div>
+      <button id="select-toggle" type="button" data-action="toggle-select-mode"
+              style="display:none" data-tip="Select multiple entries">&#x2611;&#xFE0E; Select</button>
+      <label id="group-toggle-lbl" title="Group entries under A–Z headers" style="display:none"><span>Group A–Z</span><input type="checkbox" id="group-toggle" checked></label>
+    </div>
+  </div>
+  <!-- Bulk-operations action bar (shown while in multi-select mode) -->
+  <div id="bulk-bar" style="display:none">
+    <span id="bulk-count">0 selected</span>
+    <div class="bulk-actions">
+      <button class="btn-sm" type="button" data-action="bulk-select-all" data-tip="Select / clear all visible">All</button>
+      <button class="btn-sm" type="button" data-action="bulk-fav" data-tip="Toggle favorite on selected">&#x2605; Favorite</button>
+      <button class="btn-sm" type="button" data-action="bulk-tag" data-tip="Add tags to selected">&#x1F3F7;&#xFE0E; Tag&#x2026;</button>
+      <button class="btn-sm bulk-del" type="button" data-action="bulk-delete" data-tip="Delete selected">&#x1F5D1;&#xFE0E; Delete</button>
+      <button class="btn-sm" type="button" data-action="toggle-select-mode" data-tip="Leave select mode">Done</button>
+    </div>
+    <div id="bulk-tag-row" style="display:none">
+      <input class="finput" type="text" id="bulk-tag-input" placeholder="tags to add (comma-separated)"
+             aria-label="Tags to add to selected entries" autocomplete="off" spellcheck="false"/>
+      <button class="btn-sm btn-accent" type="button" data-action="bulk-tag-apply">Add</button>
+      <button class="btn-sm" type="button" data-action="bulk-tag-cancel">Cancel</button>
+    </div>
   </div>
   <div id="reveal-progress" style="display:none"><div id="reveal-progress-fill"></div></div>
   <div class="entry-grid">
 <!-- Part 1 -->
+<span id="vault-manifest" hidden data-manifest=""></span>
+<span id="vault-kdf" hidden data-kdf="a2id|131072|3|1"></span>
 	
 <!-- Part 2 -->
   </div><!-- /entry-grid -->
@@ -1327,22 +1814,38 @@ kbd {
   <div id="newentry" class="card" style="display:none">
     <div class="card-title"><span id="newentry-title">New Entry</span></div>
 
+    <div class="frow" id="frow-type">
+      <span class="flabel">Type</span>
+      <div class="type-toggle" role="group" aria-label="Entry type">
+        <button type="button" class="type-opt is-on" id="type-opt-login"
+                data-action="set-entry-type" data-type="login"
+                data-tip="A login: URL, username, password &amp; 2FA">&#x1F511;&#xFE0E; Login</button>
+        <button type="button" class="type-opt" id="type-opt-note"
+                data-action="set-entry-type" data-type="note"
+                data-tip="A secure note: just a title and encrypted body">&#x1F4DD;&#xFE0E; Secure Note</button>
+      </div>
+    </div>
     <div class="frow">
       <span class="flabel">Name</span>
       <input class="finput" type="text" id="name" placeholder="e.g. GitHub" aria-label="Entry name"
              autocomplete="off" readonly data-clear-readonly/>
     </div>
-    <div class="frow">
+    <div class="frow" id="frow-url">
       <span class="flabel">URL</span>
       <input class="finput" type="text" id="url" placeholder="https://" aria-label="URL"
              autocomplete="off" readonly data-clear-readonly/>
     </div>
-    <div class="frow">
+    <div class="frow" id="frow-username">
       <span class="flabel">Username</span>
       <input class="finput" type="text" id="username" aria-label="Username"
              autocomplete="off" readonly data-clear-readonly/>
     </div>
-    <div class="frow pw-frow">
+    <div class="frow">
+      <span class="flabel">Tags</span>
+      <input class="finput" type="text" id="tags" placeholder="work, email, personal"
+             aria-label="Tags (comma-separated)" autocomplete="off" readonly data-clear-readonly/>
+    </div>
+    <div class="frow pw-frow" id="frow-password">
       <span class="flabel">Password</span>
       <div class="pw-col">
         <div class="pw-row">
@@ -1366,7 +1869,7 @@ kbd {
         </div>
       </div>
     </div>
-    <div class="frow">
+    <div class="frow" id="frow-token">
       <span class="flabel">2FA Token</span>
       <div class="pw-row" style="flex:1;min-width:0">
         <input class="finput" type="text" id="token" placeholder="Base32 TOTP secret" aria-label="2FA TOTP secret"
@@ -1378,9 +1881,16 @@ kbd {
       <span class="flabel" style="padding-top:2px">Notes</span>
       <textarea class="finput fnotes" id="notes" rows="3" placeholder="Optional notes" aria-label="Notes"></textarea>
     </div>
+    <div class="frow" style="align-items:flex-start">
+      <span class="flabel" style="padding-top:2px">Custom Fields</span>
+      <div class="xf-wrap">
+        <div id="extra-fields"></div>
+        <button class="btn-sm xf-add" type="button" data-action="add-extra-field" data-tip="Add a custom label/value field">&#x2795;&#xFE0E; Add field</button>
+      </div>
+    </div>
 
     <div class="card-footer">
-      <button class="btn btn-ghost" data-action="show-pw-settings" data-tip="Password generator settings">&#x2699;&#xFE0E; Generator</button>
+      <button class="btn btn-ghost" id="btn-gen-settings" data-action="show-pw-settings" data-tip="Password generator settings">&#x2699;&#xFE0E; Generator</button>
       <div style="display:flex;gap:8px">
         <button class="btn btn-ghost" data-action="cancel-entry" data-tip="Cancel and discard changes">Cancel</button>
         <button class="btn btn-accent" data-action="save-entry" data-tip="Encrypt and save entry">Save Entry</button>
@@ -1429,7 +1939,7 @@ kbd {
 <!-- Search overlay -->
 <div id="search-overlay">
   <div id="search-box">
-    <input type="text" id="search-input" placeholder="Search entries…" aria-label="Search entries" autocomplete="off"/>
+    <input type="text" id="search-input" placeholder="Search names…  or #tag  @note  !field" aria-label="Search entries by name, #tag, @note, or !custom field" autocomplete="off"/>
     <div id="search-count"></div>
     <div id="search-results"></div>
   </div>
@@ -1467,24 +1977,29 @@ kbd {
     <div id="about-body">
 
       <div class="about-section">
-        <h3>Description</h3>
-        <p>Self-hosted, client-side encrypted password manager served by a <strong>PHP-capable web server</strong>. All encryption and decryption happens entirely in your browser using the <strong>WebCrypto API</strong> — the server only stores and serves ciphertext and never sees your plaintext passwords.</p>
+        <h3>&#x2139;&#xFE0E; Description</h3>
+        <p>Self-hosted, client-side encrypted password manager served by a <strong>PHP-capable web server</strong> — or, with no PHP at all, by the bundled standalone <strong>Node.js server</strong> (<code>server.js</code>). All encryption and decryption happens entirely in your browser using the <strong>WebCrypto API</strong> — the server only stores and serves ciphertext and never sees your plaintext passwords.</p>
         <p style="margin-top:4px">Open source, released under the <a href="https://opensource.org/license/mit" target="_blank" rel="noopener">MIT License</a>.</p>
+        <p style="margin-top:4px; color:var(--text-2); font-size:.85em;">Version <span id="about-version">1.1.3</span></p>
       </div>
 
       <div class="about-section" id="about-vault-tools">
-        <h3>Vault Tools</h3>
-        <p><strong>Export</strong> downloads the encrypted database exactly as stored on the server (ciphertext only). <strong>Import</strong> restores an exported <code>.lines</code> file, replacing the whole vault in one atomic save — every imported entry is decrypted with the passwords in the key fields first, so an import that does not match those passwords is refused and nothing is changed (the server also keeps a backup of the current vault before importing). <strong>Audit</strong> decrypts every entry locally and flags reused, weak, or empty passwords — names only are shown and nothing leaves this device. <strong>Change Passwords</strong> re-encrypts the whole vault under new master passwords in one atomic save. <strong>Sign</strong> stores a keyed signature (HMAC under your master passwords) over the whole vault; it is checked automatically on every unlock and refreshed after every save, so tampering, corruption, or a rolled-back copy is detected. Use the button only to accept a deliberate manual edit or backup restore as the new baseline.</p>
+        <h3>&#x1F6E0;&#xFE0E; Vault Tools</h3>
+        <p><strong>Audit</strong> decrypts every entry locally and flags reused, weak, fair, empty, or stale (not changed in over a year) passwords — names only are shown and nothing leaves this device; secure notes have no password and are skipped. <strong>Passkeys</strong> lists which entries store a WebAuthn passkey, by name and site — this app can only view and delete a stored passkey; the companion browser extension is what creates and signs one. <strong>Trash</strong> lists entries you have deleted so you can restore them or remove them permanently; deletions are kept server-side for up to 30 days (capped at the 100 most recent; ciphertext only). <strong>Change Passwords</strong> re-encrypts the whole vault under new master passwords in one atomic save. <strong>Sign</strong> stores a keyed signature (HMAC under your master passwords) over the whole vault; it is checked automatically on every unlock and refreshed after every save, so tampering, corruption, or a rolled-back copy is detected. Use the button only to accept a deliberate manual edit or backup restore as the new baseline.</p>
         <div class="vt-btns">
-          <button class="btn btn-ghost" data-action="export-vault" data-tip="Download the encrypted database">&#x2B07;&#xFE0E; Export</button>
-          <button class="btn btn-ghost" data-action="import-vault" data-tip="Replace the whole vault from an exported .lines file">&#x2B06;&#xFE0E; Import</button>
-          <button class="btn btn-ghost" data-action="audit-vault" data-tip="Find reused / weak passwords (local only)">&#x1F50E;&#xFE0E; Audit</button>
+          <button class="btn btn-ghost" data-action="audit-vault" data-tip="Find reused / weak / stale passwords (local only)">&#x1F50E;&#xFE0E; Audit</button>
+          <button class="btn btn-ghost" data-action="list-passkeys" data-tip="List entries that store a passkey (local only)">&#x1F510;&#xFE0E; Passkeys</button>
+          <button class="btn btn-ghost" data-action="open-trash" data-tip="View and restore deleted entries">&#x1F5D1;&#xFE0E; Trash</button>
           <button class="btn btn-ghost" data-action="toggle-chpw" data-tip="Re-encrypt the vault under new passwords">&#x1F511;&#xFE0E; Change Passwords</button>
           <button class="btn btn-ghost" data-action="resign-vault" data-tip="Sign the current contents as the new integrity baseline">&#x270D;&#xFE0E; Sign</button>
         </div>
         <div id="integrity-status" style="display:none"></div>
+        <div id="audit-locked" class="vt-locked-note" style="display:none">Enter both passwords and unlock the vault first.</div>
         <div id="audit-result" style="display:none"></div>
-        <div id="import-status" style="display:none"></div>
+        <div id="passkey-locked" class="vt-locked-note" style="display:none">Enter both passwords and unlock the vault first.</div>
+        <div id="passkey-result" style="display:none"></div>
+        <div id="trash-locked" class="vt-locked-note" style="display:none">Enter both passwords and unlock the vault first.</div>
+        <div id="trash-result" style="display:none"></div>
         <div id="chpw-locked" class="vt-locked-note" style="display:none">Enter both passwords and unlock the vault first.</div>
         <div id="chpw-form" style="display:none">
           <h4 class="chpw-title">&#x1F511;&#xFE0E; Change Master Passwords</h4>
@@ -1522,6 +2037,20 @@ kbd {
         </div>
       </div>
 
+      <div class="about-section" id="about-backup">
+        <h3>&#x1F4E6;&#xFE0E; Backup &amp; Migration</h3>
+        <p><strong>Export</strong> downloads the encrypted database exactly as stored on the server (ciphertext only). <strong>Import</strong> restores an exported <code>.lines</code> file, replacing the whole vault in one atomic save — every imported entry is decrypted with the passwords in the key fields first, so an import that does not match those passwords is refused and nothing is changed (the server also keeps a backup of the current vault before importing). <strong>Export CSV</strong> writes every entry to a <em>plaintext</em> file (passwords, TOTP secrets, and notes in the clear, with none of the vault&rsquo;s protection) for migrating into another password manager &mdash; it warns and asks for confirmation first, and you should delete the file as soon as you are done. <strong>Import CSV</strong> reads a CSV exported by another manager (Bitwarden, Chrome, 1Password, &hellip;) and <em>adds</em> those entries to your vault, re-encrypting each one with the passwords in the key fields (your existing entries are kept). <strong>Import KeePass</strong> reads a KeePass 2 XML export (File &rarr; Export &rarr; KeePass XML in KeePass/KeePassXC) and adds those entries the same way. <strong>Import 1Password</strong> reads a 1Password <code>.1pux</code> export and does the same &mdash; the encrypted <code>.kdbx</code> file itself isn&rsquo;t supported, so export to XML/CSV first.</p>
+        <div class="vt-btns">
+          <button class="btn btn-ghost" data-action="export-vault" data-tip="Download the encrypted database">&#x2B07;&#xFE0E; Export</button>
+          <button class="btn btn-ghost" data-action="import-vault" data-tip="Replace the whole vault from an exported .lines file">&#x2B06;&#xFE0E; Import</button>
+          <button class="btn btn-ghost" data-action="export-csv" data-tip="Export all entries as a PLAINTEXT CSV (no encryption)">&#x2B07;&#xFE0E; Export CSV</button>
+          <button class="btn btn-ghost" data-action="import-csv" data-tip="Add entries from a CSV exported by another password manager">&#x2B06;&#xFE0E; Import CSV</button>
+          <button class="btn btn-ghost" data-action="import-keepass" data-tip="Add entries from a KeePass 2 XML export (File &rarr; Export &rarr; KeePass XML in KeePass/KeePassXC)">&#x2B06;&#xFE0E; Import KeePass</button>
+          <button class="btn btn-ghost" data-action="import-1pux" data-tip="Add entries from a 1Password .1pux export">&#x2B06;&#xFE0E; Import 1Password</button>
+        </div>
+        <div id="import-status" style="display:none"></div>
+      </div>
+
       <div class="about-section" id="about-kdf">
         <h3>&#x2699;&#xFE0E; Change KDF Parameters</h3>
         <p>Tunes the Argon2id key-derivation cost for the <strong>whole vault</strong>. Higher values make every unlock slower for you but brute-forcing far slower for an attacker. The change re-encrypts every entry in your browser under the same passwords (taken from the key fields above), then saves in a single atomic replace — if anything fails, the vault is left untouched. Memory must be 64&ndash;1024 MiB, iterations 2&ndash;10; parallelism is fixed at 1.</p>
@@ -1545,7 +2074,7 @@ kbd {
               <tr><td class="kdf-class">Workstation, max</td><td class="kdf-num">1024 MiB</td><td class="kdf-num">5</td><td class="kdf-sec-max">Maximum</td></tr>
             </tbody>
           </table>
-          <p class="chpw-note">A high memory setting multiplied by the parallel worker count must fit in this device's RAM — raise it gradually if unlocking starts to fail on low-memory devices.</p>
+          <p class="chpw-note">A high memory setting multiplied by the parallel worker count must fit in this device's RAM — raise it gradually if unlocking starts to fail on low-memory devices.<br /></p>
 
           <div class="chpw-grid">
             <label for="kdf-mem">Memory (MiB)</label>
@@ -1553,6 +2082,12 @@ kbd {
             <label for="kdf-time">Iterations</label>
             <input type="number" id="kdf-time" min="2" max="10" step="1" autocomplete="off"/>
           </div>
+          <div class="kdf-cal-row" style="display:flex;align-items:center;gap:8px;margin-top:10px;flex-wrap:wrap">
+            <label for="kdf-target" style="margin:0">Target time (ms)</label>
+            <input type="number" id="kdf-target" min="100" max="5000" step="50" value="500" autocomplete="off" style="width:90px"/>
+            <button class="btn btn-ghost" id="btn-kdf-cal" data-action="kdf-calibrate" data-tip="Benchmark Argon2id on this device and suggest an iteration count for the target time">&#x1F3CE;&#xFE0E; Calibrate</button>
+          </div>
+          <div id="kdf-cal-status" style="margin-top:6px;font-size:13px;opacity:.8"></div>
           <div class="chpw-foot">
             <div class="kdf-slider-wrap">
               <input type="range" id="kdf-slider" min="1" max="5" step="1" value="2" autocomplete="off" data-tip="Pick a preset from the table above"/>
@@ -1567,7 +2102,7 @@ kbd {
       </div>
 
       <div class="about-section" id="about-selftest">
-        <h3>Runtime Self-Test</h3>
+        <h3>&#x2697;&#xFE0E; Runtime Self-Test</h3>
         <p style="margin-bottom:10px">Runs automatically on <strong>every page load</strong>. If any check fails a warning dialog is shown immediately. The tests also run each time this panel opens.</p>
         <div id="selftest-banner">&#x2026; Running tests</div>
         <div class="selftest-row">
@@ -1598,25 +2133,48 @@ kbd {
           <button class="btn btn-ghost" data-action="retest-crypto">&#x21bb; Retest</button>
         </div>
       </div>
+
+      <div class="about-section" id="about-copying">
+        <h3>&#x29C9;&#xFE0E; Viewing &amp; Copying</h3>
+        <p>Click any entry to fill the display panel at the top with its decrypted fields. The <strong>Username</strong>, <strong>2FA token</strong>, and <strong>Password</strong> rows are <strong>click-to-copy</strong> &mdash; click anywhere on the row to copy that field to the clipboard. A brief flash confirms the copy.</p>
+        <p style="margin-top:6px">Each copyable row carries a dimmed <strong>&#x29C9;&#xFE0E; copy glyph</strong> on its right edge that brightens when you hover the row, marking it as copyable at a glance. The glyph is only a visual cue &mdash; the whole row is the click target, so copying works the same on touch screens where there is no hover.</p>
+        <p style="margin-top:6px">A copied secret is <strong>auto-cleared from the clipboard after 45 seconds</strong>, and immediately on any lock, so it never lingers there.</p>
+        <p style="margin-top:6px"><strong>Custom fields</strong> appear as their own click-to-copy rows; any marked <em>secret</em> show masked (&bull;&bull;&bull;&bull;) but still copy on click. If the entry has <strong>password history</strong>, a collapsible <strong>&#x23F1;&#xFE0E; Password history</strong> row lists previously used passwords (each with the date it was replaced), also click-to-copy.</p>
+        <p style="margin-top:6px">Next to the password, a <strong>&#x1F4DD;&#xFE0E; Modified</strong> column shows the date the password was last changed &mdash; or the creation date, if it never has. Hover it for a tooltip with the entry's <strong>creation date</strong> and <strong>age</strong>. Entries saved before this tracking existed show a best-effort creation date (prefixed &ldquo;&le;&rdquo;) inferred from the oldest password-history entry, or the modified date if there is no history &mdash; both are upper bounds on the true creation time.</p>
+      </div>
       
       <div class="about-section" id="about-shortcuts">
-        <h3>Keyboard Shortcuts</h3>
-        <p>Single-key shortcuts work whenever you are not typing in a field.</p>
+        <h3>&#x2328;&#xFE0E; Keyboard Shortcuts</h3>
+        <p>Single-key shortcuts work whenever you are not typing in a field. <kbd>Shift</kbd>&#x202F;<kbd>Enter</kbd> works inside the entry form.</p>
         <table class="ks-table">
+          <tr><td class="ks-key"><kbd>Shift</kbd> <kbd>Enter</kbd></td><td class="ks-desc">Save the entry being added or edited (from any field in the form &mdash; except <strong>Notes</strong>, where it inserts a newline)</td></tr>
           <tr><td class="ks-key"><kbd>?</kbd></td><td class="ks-desc">Open / close search</td></tr>
           <tr><td class="ks-key"><kbd>N</kbd></td><td class="ks-desc">New entry (when the &#xff0b; New button is enabled)</td></tr>
           <tr><td class="ks-key"><kbd>E</kbd></td><td class="ks-desc">Edit the selected entry (when one is displayed)</td></tr>
           <tr><td class="ks-key"><kbd>Shift</kbd> <kbd>D</kbd></td><td class="ks-desc">Delete the selected entry, with confirmation (when one is displayed)</td></tr>
+          <tr><td class="ks-key"><kbd>F</kbd></td><td class="ks-desc">Toggle favorite on the selected entry (when one is displayed)</td></tr>
           <tr><td class="ks-key"><kbd>C</kbd></td><td class="ks-desc">Clear the displayed entry</td></tr>
-          <tr><td class="ks-key"><kbd>A</kbd> / <kbd>I</kbd></td><td class="ks-desc">Open this About panel</td></tr>
+          <tr><td class="ks-key"><kbd>A</kbd> / <kbd>I</kbd></td><td class="ks-desc">Open / close this About panel</td></tr>
           <tr><td class="ks-key"><kbd>X</kbd></td><td class="ks-desc">Lock the vault</td></tr>
+          <tr><td class="ks-key"><kbd>U</kbd></td><td class="ks-desc">Toggle Disable auto-lock (while this About panel is open)</td></tr>
           <tr><td class="ks-key"><kbd>Esc</kbd></td><td class="ks-desc">Close dialog / clear displayed entry</td></tr>
           <tr><td class="ks-key"><kbd>Esc</kbd> <kbd>Esc</kbd></td><td class="ks-desc">Lock the vault (press twice quickly)</td></tr>
         </table>
       </div>      
 
+      <div class="about-section" id="about-organizing">
+        <h3>&#x1F3F7;&#xFE0E; Organizing &amp; Searching</h3>
+        <p><strong>Tags.</strong> Each entry can carry a comma-separated list of tags (e.g. <code>work, email, personal</code>). Tags are normalized on save &mdash; lowercased, trimmed, and de-duplicated &mdash; and are stored <strong>inside the encrypted payload</strong>, exactly like the password and notes, so they are as protected as any other field and never appear in the database in the clear.</p>
+        <p style="margin-top:6px"><strong>Scoped search.</strong> The search overlay matches by a leading character: type plainly to search entry <strong>names</strong>, prefix with <code>#</code> to search <strong>tags</strong> (e.g. <code>#work</code>), <code>@</code> to search <strong>notes</strong> (e.g. <code>@recovery</code>), or <code>!</code> to search <strong>custom fields</strong> &mdash; both labels and values (e.g. <code>!PIN</code>). The count line shows which scope is active. Tag, note, and custom-field search read the decrypted payloads cached in memory, so they cover every entry once both passwords are entered and all names have been revealed.</p>
+        <p style="margin-top:6px"><strong>Group A&ndash;Z.</strong> The entry grid is always sorted alphabetically; the <strong>Group A&ndash;Z</strong> toggle (beside the entry count, once the vault is unlocked) adds sticky first-letter headers above each run of entries &mdash; names not starting with a letter are bucketed under <code>#</code>. The preference is remembered per vault in your browser (on by default).</p>
+        <p style="margin-top:6px"><strong>Favorites.</strong> Click the &#x2606; star in the display panel (or press <kbd>F</kbd>) to favorite the open entry. Favorites pin to the top of the grid &mdash; under a <strong>&#x2605; Favorites</strong> header when grouping is on &mdash; and show a &#x2605; on their button. The set is remembered per vault in your browser as a <strong>one-way hash of each name</strong> (never the name itself), so it survives edits and reveals nothing if local storage is read.</p>
+        <p style="margin-top:6px"><strong>Custom fields.</strong> Entries can carry any number of extra labelled values (added with <strong>&#x2795;&#xFE0E; Add field</strong> in the form), each optionally marked <em>secret</em> to mask it in the panel. Like tags, they live inside the encrypted payload and are as protected as every other field.</p>
+        <p style="margin-top:6px"><strong>Secure notes.</strong> The <strong>Type</strong> toggle at the top of the entry form switches between a <strong>Login</strong> (URL, username, password, 2FA) and a <strong>Secure Note</strong> &mdash; just a name plus notes, tags, and custom fields, with the credential rows and password generator hidden. The type travels inside the encrypted payload like tags, so it adds no new record format; note entries show a &#x1F4DD;&#xFE0E; badge on their button and are skipped by Audit (there is no password to check).</p>
+        <p style="margin-top:6px"><strong>Multi-select.</strong> The &#x2611;&#xFE0E; <strong>Select</strong> control beside Group A&ndash;Z turns the grid into a checklist &mdash; click entries to toggle their selection, then use the bar that appears at the bottom to <strong>Favorite</strong>, <strong>Tag&hellip;</strong>, or <strong>Delete</strong> all of them in one save. Bulk delete can&rsquo;t empty the vault (leave at least one entry off, or delete the last one individually) and offers an <strong>Undo</strong> for a few seconds afterward; bulk tag merges the typed tags into each selected entry without touching its other fields.</p>
+      </div>
+
       <div class="about-section" id="about-vault-signing">
-        <h3>Vault Signing</h3>
+        <h3>&#x270D;&#xFE0E; Vault Signing</h3>
         <p>Every save automatically signs the entire record set with a <strong>keyed HMAC</strong> that only a password holder can produce. The server stores the signature opaquely — it has no access to your passwords and can never forge or verify it. On every unlock, the browser recomputes the signature over the records it received and compares. Any discrepancy — an entry tampered with, silently deleted, or corrupted — is shown as a red failure badge rather than passing unnoticed.</p>
         <p style="margin-top:8px"><strong>Signature construction</strong></p>
         <table class="cr-table" style="margin-top:4px">
@@ -1631,21 +2189,23 @@ kbd {
       </div>
 
       <div class="about-section">
-        <h3>Record Formats</h3>
+        <h3>&#x1F5C2;&#xFE0E; Record Formats</h3>
         <p><strong>Record format (v6)&thinsp;—&thinsp;doubly-encrypted name:</strong></p>
         <p><code>encName | v6 | recSalt1 | recSalt2 | nameNonce1 | nameNonce2 | iv1 | nonce2 | nonce3 | nonce4 | ciphertext</code></p>
         <p style="margin-top:4px"><code>recSalt1</code> and <code>recSalt2</code> are the two Argon2id salts (one per master password); every per-cipher key is HKDF-derived from the resulting master keys, so the record carries only nonces, not per-layer salts. The entry name is double-encrypted: <code>AES-256-GCM</code> (password&nbsp;1) as the inner layer, wrapped by <code>ChaCha20-Poly1305</code> (password&nbsp;2) as the outer layer. Both passwords are required to reveal the name. Entry buttons are hidden on page load; they appear automatically when both key fields contain a value and the secondary key field loses focus.</p>
-        <p style="margin-top:4px">Records are stored in a flat file, one per line, sorted alphabetically. The line index is appended at runtime for delete operations.</p>
+        <p style="margin-top:4px">Records are stored in a flat file, one per line, sorted by the raw bytes of the full encrypted record &mdash; since the name itself is encrypted, that is <em>not</em> alphabetical by name; it just keeps the file in a stable, deterministic order. The entry grid you see is re-sorted alphabetically in the browser, by the real name, after it is decrypted. Each button also carries its line index as an informational 12th field, but it is never used to identify a record &mdash; delete and edit always reference the full record string instead, so a concurrent change elsewhere can't make an operation land on the wrong line.</p>
+        <p style="margin-top:4px">The encrypted payload (<code>ciphertext</code>) is a JSON object holding the URL, username, password, 2FA token, notes, tags, <strong>custom fields</strong>, <strong>password history</strong>, <strong>creation</strong> / <strong>password-modified</strong> timestamps, an optional <strong>entry type</strong> (<code>login</code> or secure <strong>note</strong>), and an optional <strong>passkey</strong> (WebAuthn credential). These all live inside the same encrypted blob &mdash; the record format itself is unchanged, so every one of them is as protected as the password.</p>
       </div>
 
       <div class="about-section">
-        <h3>Key Derivation</h3>
-        <p>Each record derives <strong>two 256-bit master keys</strong> with memory-hard <code>Argon2id</code> (<strong>m&nbsp;=&nbsp;128&nbsp;MiB, t&nbsp;=&nbsp;3, p&nbsp;=&nbsp;1</strong>) &mdash; one per master password, each over a <strong>32-byte random salt</strong> generated fresh for every save. <code>HKDF-SHA-256</code> then expands each master key into the independent per-cipher subkeys (distinct <code>info</code> labels), so the expensive memory-hard step runs only <strong>twice per record</strong> while every layer still gets its own key.</p>
-        <p style="margin-top:6px">Revealing many entry names at once would otherwise serialise the memory-hard hashes on the main thread (the WASM runs synchronously behind an internal mutex). To keep the UI responsive, each derivation is dispatched to a pool of dedicated <strong>Web Workers</strong> &mdash; one WebAssembly instance each &mdash; so peak memory stays bounded at pool&nbsp;&times;&nbsp;128&nbsp;MiB. The pool is sized at the <strong>reported CPU core count</strong> &mdash; capped at <strong>16</strong> on desktop and <strong>2</strong> on phones/tablets (less RAM, thermal throttling) &mdash; and further bounded by available device memory so the 128&nbsp;MiB heaps stay within roughly half of RAM. It is created lazily and torn down on every lock, reclaiming its WASM heaps and dropping residual password bytes. A derivation that fails transiently (memory pressure, a worker crash) is <strong>retried</strong> &mdash; falling back to the main thread between attempts &mdash; so an entry is never silently dropped from the grid; if Workers are unavailable entirely, derivation runs on the main thread.</p>
+        <h3>&#x1F511;&#xFE0E; Key Derivation</h3>
+        <p>Each record derives <strong>two 256-bit master keys</strong> with memory-hard <code>Argon2id</code> (default <strong>m&nbsp;=&nbsp;128&nbsp;MiB, t&nbsp;=&nbsp;3, p&nbsp;=&nbsp;1</strong>, adjustable per vault in <em>Change KDF Parameters</em>) &mdash; one per master password, each over a <strong>32-byte random salt</strong> generated fresh for every save. <code>HKDF-SHA-256</code> then expands each master key into the independent per-cipher subkeys (distinct <code>info</code> labels), so the expensive memory-hard step runs only <strong>twice per record</strong> while every layer still gets its own key.</p>
+        <p style="margin-top:6px">The memory-hard step is what makes an offline brute-force attack infeasible: every single password guess costs a full memory pass (128&nbsp;MiB at the default cost) plus significant CPU time, so a GPU farm that tests billions of fast hashes per second is reduced to a few thousand Argon2id guesses per second per card. Combined with a strong, unique second password, this raises the cost of guessing the vault open to be computationally prohibitive.</p>
+        <p style="margin-top:6px">Revealing many entry names at once would otherwise serialise the memory-hard hashes on the main thread (the WASM runs synchronously behind an internal mutex). To keep the UI responsive, each derivation is dispatched to a pool of dedicated <strong>Web Workers</strong> &mdash; one WebAssembly instance each &mdash; so peak memory stays bounded at pool&nbsp;&times;&nbsp;the per-worker heap (128&nbsp;MiB at the default cost). The pool is sized at the <strong>reported CPU core count</strong> &mdash; capped at <strong>24</strong> on desktop and <strong>2</strong> on phones/tablets (less RAM, thermal throttling) &mdash; and further bounded by available device memory so the heaps stay within roughly half of RAM. It is created lazily and torn down on every lock, reclaiming its WASM heaps and dropping residual password bytes. A derivation that fails transiently (memory pressure, a worker crash) is <strong>retried</strong> &mdash; falling back to the main thread between attempts &mdash; so an entry is never silently dropped from the grid; if Workers are unavailable entirely, derivation runs on the main thread.</p>
       </div>
 
       <div class="about-section">
-        <h3>Encryption Pipeline</h3>
+        <h3>&#x26D3;&#xFE0E; Encryption Pipeline</h3>
         <div class="about-chain">
           <span class="about-chip">Plaintext&nbsp;JSON</span>
           <span>&#x2192;</span>
@@ -1678,17 +2238,12 @@ kbd {
           <span><code>Serpent-256-CTR</code> &mdash; password&nbsp;2, 16-byte nonce (unauthenticated; relies on inner AEAD layers for integrity)</span>
         </div>
         <p style="margin-top:6px">The two inner AEAD layers authenticate the ciphertext. A wrong password or tampered data causes immediate authentication failure before any plaintext is revealed.</p>
+        <p style="margin-top:6px"><strong>Both passwords are required.</strong> Layers&nbsp;1&ndash;2 use password&nbsp;1 and layers&nbsp;3&ndash;4 use password&nbsp;2 (the entry name is split the same way &mdash; AES-256-GCM under password&nbsp;1, ChaCha20-Poly1305 under password&nbsp;2), so an attacker who compromises one password alone learns nothing about names or payload.</p>
         <p style="margin-top:6px"><strong>Length-hiding padding.</strong> Before the first layer, the plaintext JSON is padded up to the next <strong>256-byte</strong> boundary with trailing spaces. The stored ciphertext length therefore reveals only which 256-byte bucket an entry falls into &mdash; not the true length of a password or note &mdash; so someone who obtains the raw database cannot tell a short password from a long one. The padding is valid trailing JSON whitespace, so it is discarded automatically on decrypt with no separate un-pad step.</p>
       </div>
 
       <div class="about-section">
-        <h3>Two-Password Design</h3>
-        <p>Layers 1 and 2 use <strong>password 1</strong>; layers 3 and 4 use <strong>password 2</strong>. Both passwords are required to decrypt any entry. Either password alone reveals nothing about the stored data.</p>
-        <p style="margin-top:6px">The entry <strong>name</strong> is protected by both passwords as well: the inner <code>AES-256-GCM</code> layer uses password&nbsp;1; the outer <code>ChaCha20-Poly1305</code> layer uses password&nbsp;2. An attacker who compromises one password cannot reveal entry names or payload.</p>
-      </div>
-
-      <div class="about-section">
-        <h3>Cipher Rationale</h3>
+        <h3>&#x1F6E1;&#xFE0E; Cipher Rationale</h3>
         <p>The four layers span <strong>three independent cipher families</strong> from different design lineages. An attacker breaking the stored ciphertext must defeat all four simultaneously &mdash; breaking AES does not weaken ChaCha20, Twofish, or Serpent. Each cipher was chosen to complement the others' failure modes.</p>
         <table class="cr-table">
           <tr>
@@ -1712,19 +2267,18 @@ kbd {
             <td class="cr-desc">AES finalist that came <strong>second</strong> in the panel vote, designed by Ross Anderson, Eli Biham, and Lars Knudsen. Chosen by the designers specifically for its conservative security margin: 32 rounds (vs AES&rsquo;s 14), with a simple bitslice structure that has resisted cryptanalysis for over 25 years. The outermost layer &mdash; any weakness in layers 1&ndash;3 is still protected here.</td>
           </tr>
         </table>
-        <p style="margin-top:10px"><strong>Argon2id &mdash; making brute-force infeasible.</strong> Before any cipher sees a key, each password is passed through Argon2id (PHC winner, 2015) with <strong>128&nbsp;MiB of RAM and 3 passes</strong>. This means every single password guess an attacker makes requires 128&nbsp;MiB of memory and significant CPU time. A GPU farm that can test billions of bcrypt hashes per second is reduced to a few thousand Argon2id guesses per second per card. Combined with a strong, unique second password, this raises the cost of an offline brute-force attack to be computationally prohibitive.</p>
-        <p style="margin-top:6px">The overall result: even if an attacker obtains the raw ciphertext file, they face four independent cipher layers with independent HKDF-derived keys, two independent AEAD authentication checks, and a memory-hard KDF that serialises every guess into a 128&nbsp;MiB, multi-pass operation &mdash; all of which must be overcome before a single password is revealed.</p>
+        <p style="margin-top:10px"><strong>Argon2id (PHC winner, 2015)</strong> sits in front of all four ciphers as the memory-hard key-derivation step &mdash; see <em>Key Derivation</em> above for the cost parameters and why they make offline brute-force infeasible.</p>
+        <p style="margin-top:6px">The overall result: even if an attacker obtains the raw ciphertext file, they face four independent cipher layers with independent HKDF-derived keys, two independent AEAD authentication checks, and a memory-hard KDF that serialises every guess &mdash; all of which must be overcome before a single password is revealed.</p>
       </div>
 
       <div class="about-section">
-        <h3>TOTP (2FA)</h3>
-        <p><code>HMAC-SHA-1</code> &mdash; RFC&nbsp;6238 &mdash; 30-second window &mdash; 6-digit codes.</p>
-        <p>Secrets are stored as Base32 in the <code>token</code> field, encrypted with the rest of the entry fields.</p>
-        <p style="margin-top:4px">The <strong>📷 Scan QR</strong> button in the new-entry form uses the browser's <code>BarcodeDetector</code> API to read a TOTP QR code from a photo or image file. The <code>secret=</code> parameter is extracted from the <code>otpauth://</code> URI; the issuer and account name are used to pre-fill the Name and Username fields if they are empty. Requires Chrome&nbsp;83+, Edge&nbsp;83+, or Safari&nbsp;17.4+.</p>
+        <h3>&#x23F1;&#xFE0E; TOTP (2FA)</h3>
+        <p>The <code>token</code> field accepts a bare Base32 secret &mdash; the common case, defaulting to a 6-digit code on a 30-second window via <code>HMAC-SHA-1</code> (RFC&nbsp;6238) &mdash; or a full <code>otpauth://</code> URI, which can override the digit count, period, and hash algorithm (<code>SHA-1</code> / <code>SHA-256</code> / <code>SHA-512</code>), including <strong>Steam&nbsp;Guard</strong>'s 5-character codes. Either way the token is encrypted with the rest of the entry, and the live code's countdown ring follows whichever period the entry actually uses.</p>
+        <p style="margin-top:4px">The <strong>📷 Scan QR</strong> button in the new-entry form uses the browser's <code>BarcodeDetector</code> API to read a TOTP QR code from a photo or image file. A plain default TOTP stores just the secret; a URI with non-default digits/period/algorithm or Steam Guard keeps the full <code>otpauth://</code> URI so those settings survive. The issuer and account name pre-fill the Name and Username fields if they are empty. Requires Chrome&nbsp;83+, Edge&nbsp;83+, or Safari&nbsp;17.4+.</p>
       </div>
 
       <div class="about-section">
-        <h3>Password Strength</h3>
+        <h3>&#x1F4CA;&#xFE0E; Password Strength</h3>
         <p>While typing a password in the new-entry form, a six-segment bar and label estimate strength from the character classes present (lowercase, uppercase, digits, symbols) and the password length. Entropy is reported in bits.</p>
         <table style="width:100%;margin-top:6px;border-collapse:collapse;font-size:12px">
           <tr><td style="color:#ff5c5c;font-family:var(--mono);padding:1px 8px 1px 0">Weak</td><td style="color:var(--text-2)">&lt; 40 bits</td></tr>
@@ -1734,20 +2288,23 @@ kbd {
           <tr><td style="color:#a878ff;font-family:var(--mono);padding:1px 8px 1px 0">Exceptional</td><td style="color:var(--text-2)">160 – 199 bits</td></tr>
           <tr><td style="color:#ff5cc8;font-family:var(--mono);padding:1px 8px 1px 0">Paranoid</td><td style="color:var(--text-2)">&ge; 200 bits</td></tr>
         </table>
+        <p style="margin-top:8px">The two <strong>master password</strong> fields share a second bar that scores their <em>combined</em> strength (using higher thresholds, since two independent passwords should together be harder to guess than one entry password). If the combined score falls under the lowest tier, the <strong>＋ New</strong> button is disabled and reads <strong>Too Weak</strong> until a stronger pair is entered. The same combined scoring drives the strength bar in <strong>Change Passwords</strong>.</p>
       </div>
 
       <div class="about-section">
-        <h3>Key Caching</h3>
+        <h3>&#x1F5C4;&#xFE0E; Key Caching</h3>
         <p>Argon2id master keys are memoised per <code>(password,&nbsp;salt)</code> pair for the duration of the session, so each entry incurs only its two memory-hard derivations once. Clicking an entry after reveal-all reuses the cached master keys (no further Argon2id work). The cache is wiped on auto-lock or manual clear.</p>
       </div>
 
       <div class="about-section">
-        <h3>Auto-lock</h3>
+        <h3>&#x231B;&#xFE0E; Auto-lock</h3>
         <p>After <strong>5 minutes</strong> of inactivity a 60-second warning appears. If not dismissed, all key fields and cached keys are cleared from memory.</p>
+        <p>This preference is remembered on this device and stays in effect across reloads and vault locks until you turn it back on.</p>
+        <label class="about-check"><input type="checkbox" id="autolock-disable-toggle"/> Disable auto-lock (not recommended)</label>
       </div>
 
       <div class="about-section">
-        <h3>Libraries &amp; Attribution</h3>
+        <h3>&#x1F4DA;&#xFE0E; Libraries &amp; Attribution</h3>
         <p>Cipher primitives are third-party open-source, bundled <strong>inline</strong> &mdash; no runtime network requests; Argon2id WASM is embedded as base64. Each is used under its license, upstream notices retained.</p>
         <table class="lib-table">
           <tr>
@@ -1779,15 +2336,15 @@ kbd {
       </div>
 
       <div class="about-section">
-        <h3>Standards Alignment</h3>
+        <h3>&#x1F4DC;&#xFE0E; Standards Alignment</h3>
         <div class="standards-grid">
           <span class="sg-name">Argon2 (RFC 9106)</span>
           <span class="sg-met">Met</span>
-          <span class="sg-desc">Argon2id key derivation &mdash; m&nbsp;=&nbsp;128&nbsp;MiB, t&nbsp;=&nbsp;3, p&nbsp;=&nbsp;1 (exceeds the RFC&nbsp;9106 second-recommended option), then HKDF-SHA-256 subkeys</span>
+          <span class="sg-desc">Argon2id key derivation &mdash; <span id="std-argon-params">m&nbsp;=&nbsp;128&nbsp;MiB, t&nbsp;=&nbsp;3, p&nbsp;=&nbsp;1</span> (vault-tunable; exceeds the RFC&nbsp;9106 second-recommended option), then HKDF-SHA-256 subkeys</span>
 
-          <span class="sg-name">RFC 6238</span>
+          <span class="sg-name">RFC 6238 / 4226</span>
           <span class="sg-met">Met</span>
-          <span class="sg-desc">TOTP &mdash; 30-second window, 6-digit codes</span>
+          <span class="sg-desc">TOTP &mdash; configurable period and digit count, SHA-1/256/512, plus Steam&nbsp;Guard codes (defaults: 30-second window, 6 digits, SHA-1)</span>
 
           <span class="sg-name">OWASP ASVS L1/L2</span>
           <span class="sg-met">Met</span>
@@ -1804,7 +2361,7 @@ kbd {
       </div>
 
       <div class="about-section">
-        <h3>Hello There</h3>
+        <h3>&#x1F44B;&#xFE0E; Hello There</h3>
         <p>You read this far and made it all the way to the end?<br />As a reward: stand up, take a 5 minute break and go stretch.</p>
       </div>
 

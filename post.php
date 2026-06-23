@@ -36,10 +36,28 @@ const RL_WINDOW   = 900;  // 15 minutes
 const RL_MAX_FAIL = 5;    // failures per window before lockout
 
 // ---- Backup retention ----
-// Keep at most this many timestamped lines backups in bak/. They accumulate one
-// per write and are full ciphertext-DB copies, so cap them to bound disk use and
-// on-disk retention of historical vault state.
-const BAK_KEEP = 50;
+// Backups accumulate one per write in bak/ and are full ciphertext-DB copies, so
+// they are pruned on every write to bound disk use and on-disk retention of
+// historical vault state: drop any older than BAK_MAX_AGE, then keep only the
+// newest BAK_KEEP (oldest removed first). Both default sensibly and can be
+// overridden per-deployment via the VAULT_BAK_KEEP / VAULT_BAK_MAX_AGE_DAYS
+// environment variables; 0 disables that limit (unlimited count / no age cutoff).
+function env_uint($name, $default) {
+    $v = getenv($name);
+    return ($v !== false && preg_match('/^\d+$/', $v)) ? (int)$v : $default;
+}
+define('BAK_KEEP',    env_uint('VAULT_BAK_KEEP', 100));                 // newest N kept
+define('BAK_MAX_AGE', env_uint('VAULT_BAK_MAX_AGE_DAYS', 60) * 86400);  // seconds
+
+// ---- Trash (soft delete) retention ----
+// Deleted records are moved to the `trash` file instead of being discarded, so
+// they can be restored from the UI. One record per line, stored as
+// "<unixSec>\t<v6record>". Capped to the newest TRASH_KEEP and pruned of entries
+// older than TRASH_MAX_AGE on every trash write. Like `lines`/`bak`, this holds
+// ciphertext only — denied direct HTTP access in .htaccess / nginx config.
+const TRASH_FILE    = 'trash';
+const TRASH_KEEP    = 100;
+const TRASH_MAX_AGE = 2592000;   // 30 days, in seconds
 
 // ---- Bulk replace cap ----
 // Upper bound on the bulk_data payload (whole-vault replace, used by the
@@ -162,6 +180,12 @@ function is_same_origin() {
     // Verify the Origin header when present (set by all modern browsers).
     $origin = $_SERVER['HTTP_ORIGIN'] ?? '';
     if ($origin !== '') {
+        // The passkey companion extension POSTs writes from its own
+        // chrome-extension:// / moz-extension:// origin. A web page cannot forge
+        // these origins (the browser sets them), and writes are still Basic-Auth
+        // gated, so accept them alongside the same-origin web app.
+        $scheme = strtolower(parse_url($origin, PHP_URL_SCHEME) ?? '');
+        if ($scheme === 'chrome-extension' || $scheme === 'moz-extension') return true;
         $origin_host = parse_url($origin, PHP_URL_HOST) ?? '';
         return $origin_host === $host;
     }
@@ -246,6 +270,42 @@ function is_valid_kdf($s) {
     return true;
 }
 
+// ---- Trash file helpers ----
+// Read `trash` into [ ['ts'=>int, 'rec'=>string], ... ]. Each stored line is
+// "<unixSec>\t<v6record>"; malformed lines are skipped. The caller must hold the
+// `lines` flock (all trash mutations are serialized on it, same as `lines`).
+function trash_read() {
+    $out = [];
+    $raw = @file_get_contents(TRASH_FILE);
+    if (!is_string($raw) || $raw === '') return $out;
+    foreach (preg_split('/\R/', $raw, -1, PREG_SPLIT_NO_EMPTY) as $ln) {
+        $tab = strpos($ln, "\t");
+        if ($tab === false) continue;
+        $ts  = (int) substr($ln, 0, $tab);
+        $rec = substr($ln, $tab + 1);
+        if ($ts <= 0 || !is_valid_record($rec)) continue;
+        $out[] = ['ts' => $ts, 'rec' => $rec];
+    }
+    return $out;
+}
+
+// Write the trash list back, dropping entries older than TRASH_MAX_AGE and
+// keeping only the newest TRASH_KEEP. Returns false on write failure. Caller
+// holds the `lines` flock.
+function trash_write(array $items) {
+    $now = time();
+    $items = array_values(array_filter($items, function ($it) use ($now) {
+        return ($now - $it['ts']) <= TRASH_MAX_AGE;
+    }));
+    usort($items, function ($a, $b) { return $b['ts'] - $a['ts']; });   // newest first
+    if (count($items) > TRASH_KEEP) $items = array_slice($items, 0, TRASH_KEEP);
+    $buf = '';
+    foreach ($items as $it) { $buf .= $it['ts'] . "\t" . $it['rec'] . "\n"; }
+    if (@file_put_contents(TRASH_FILE, $buf) === false) return false;
+    @chmod(TRASH_FILE, 0600);
+    return true;
+}
+
 // ---- Input validation ----
 // Skipped entirely in regen mode (no record is read from the request).
 $data       = null;
@@ -258,7 +318,23 @@ $expect_hash = '';
 $sign        = false; // store a new integrity manifest (no record change)
 $manifest_in = null;
 $kdf_in      = null;  // new vault-wide Argon2id params (only valid on the bulk path)
+$trash_list  = false; // list the trash contents (read-only) as JSON
+$purge_trash = null;  // permanently drop a record (or "__all__") from the trash
+$untrash_rec = null;  // restore a record from trash back into `lines`
+$untrash     = false; // set when untrash_rec rides the normal add path
 if (!$regen) {
+    $trash_list  = isset($_POST['trash']);
+    $purge_trash = isset($_POST['purge_trash']) ? $_POST['purge_trash'] : null;
+    $untrash_rec = isset($_POST['untrash_rec']) ? $_POST['untrash_rec'] : null;
+    if ($purge_trash !== null) {
+        // Purge-from-trash is exclusive and only touches the `trash` file.
+        if ($purge_trash !== '__all__' && !is_valid_record($purge_trash)) {
+            http_response_code(400);
+            exit('Invalid data');
+        }
+    } elseif ($trash_list) {
+        // Listing trash reads no record params — handled after the flock below.
+    } else {
     $restore = isset($_POST['restore']);
     $bulk = isset($_POST['bulk']) || $restore;   // restore reuses the bulk write path
     $sign = isset($_POST['sign']);
@@ -342,6 +418,19 @@ if (!$regen) {
             http_response_code(400);
             exit('Invalid data');
         }
+
+        // Restore-from-trash rides the normal add path: the record is re-inserted
+        // into `lines` and then dropped from `trash` after the write. It must be a
+        // well-formed v6 record (it is one of ours).
+        if ($untrash_rec !== null) {
+            if (!is_valid_record($untrash_rec)) {
+                http_response_code(400);
+                exit('Invalid data');
+            }
+            $data    = $untrash_rec;
+            $untrash = true;
+        }
+    }
     }
 }
 
@@ -372,6 +461,40 @@ function respond_stale($linesfp) {
     http_response_code(409);
     header('Content-Type: application/json; charset=utf-8');
     echo json_encode(['ok' => false, 'error' => 'stale']);
+    flock($linesfp, LOCK_UN);
+    fclose($linesfp);
+    exit;
+}
+
+// ---- Trash list / purge ----
+// Both are handled entirely here (under the `lines` flock) and never touch
+// `lines` or rebuild index.html. List is read-only; purge drops one record (or
+// everything) from the `trash` file.
+if ($trash_list) {
+    $items = trash_read();
+    usort($items, function ($a, $b) { return $b['ts'] - $a['ts']; });   // newest first
+    $rows = [];
+    foreach ($items as $it) { $rows[] = ['ts' => $it['ts'], 'record' => $it['rec']]; }
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode(['ok' => true, 'trash' => $rows]);
+    flock($linesfp, LOCK_UN);
+    fclose($linesfp);
+    exit;
+}
+if ($purge_trash !== null) {
+    if ($purge_trash === '__all__') {
+        $items = [];
+    } else {
+        $items = array_values(array_filter(trash_read(), function ($it) use ($purge_trash) {
+            return $it['rec'] !== $purge_trash;
+        }));
+    }
+    if (trash_write($items) === false) {
+        http_response_code(500);
+        exit('Write failed');
+    }
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode(['ok' => true, 'purged' => true, 'count' => count($items)]);
     flock($linesfp, LOCK_UN);
     fclose($linesfp);
     exit;
@@ -411,13 +534,24 @@ if (!$regen) {
     }
 }
 
-// Delete all but the $keep most recent bak/lines.* files. The timestamp suffix
-// is fixed-width and zero-padded, so a lexical sort is chronological (oldest first).
-function prune_backups($keep) {
+// Prune bak/lines.* backups: first drop any older than $maxAge seconds, then keep
+// only the $keep most recent. The timestamp suffix is fixed-width and zero-padded,
+// so a lexical sort is chronological (oldest first), and the oldest are always the
+// ones removed. A 0 for either limit disables that dimension.
+function prune_backups($keep, $maxAge) {
     $files = @glob('./bak/lines.*');
-    if ($files === false || count($files) <= $keep) return;
-    sort($files, SORT_STRING);
-    foreach (array_slice($files, 0, count($files) - $keep) as $f) { @unlink($f); }
+    if ($files === false || !$files) return;
+    sort($files, SORT_STRING);   // oldest first
+    if ($maxAge > 0) {
+        $cutoff = time() - $maxAge;
+        $files = array_values(array_filter($files, function ($f) use ($cutoff) {
+            if (@filemtime($f) < $cutoff) { @unlink($f); return false; }
+            return true;
+        }));
+    }
+    if ($keep > 0 && count($files) > $keep) {
+        foreach (array_slice($files, 0, count($files) - $keep) as $f) { @unlink($f); }
+    }
 }
 
 // ---- Backup the lines file before modifying it ----
@@ -437,8 +571,8 @@ if (!$regen && !$sign && $current !== '') {
     }
     // Backups hold the full ciphertext DB — keep them owner-only on disk.
     @chmod($bakfile, 0600);
-    // Drop the oldest backups beyond the retention cap.
-    prune_backups(BAK_KEEP);
+    // Drop backups beyond the age cutoff, then beyond the retention cap.
+    prune_backups(BAK_KEEP, BAK_MAX_AGE);
 }
 
 // ---- Update the database (lines file) ----
@@ -462,10 +596,29 @@ if ($regen || $sign) {
         $array = $bulk_lines;
     } else {
         if ($de >= 0 && $de < count($array)) {
+            $removed_rec = $array[$de];
             array_splice($array, $de, 1);   // remove and re-index in one step
+            // Soft delete: keep the removed record in `trash` so the UI can
+            // restore it. Best-effort — a trash-write failure must not abort the
+            // delete (the record is also captured in bak/ as before).
+            if (is_valid_record($removed_rec)) {
+                $titems = trash_read();
+                $titems[] = ['ts' => time(), 'rec' => $removed_rec];
+                trash_write($titems);
+            }
         }
-        if ($data !== null) {
+        // Add (dedup — records are unique, so a stray duplicate is never wanted;
+        // matters for restore-from-trash if the record somehow still exists).
+        if ($data !== null && !in_array($data, $array, true)) {
             $array[] = $data;
+        }
+        // Restore-from-trash: now that the record is back in `lines`, drop it
+        // from the trash list.
+        if ($untrash) {
+            $titems = array_values(array_filter(trash_read(), function ($it) use ($untrash_rec) {
+                return $it['rec'] !== $untrash_rec;
+            }));
+            trash_write($titems);
         }
     }
     sort($array, SORT_STRING);

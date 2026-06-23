@@ -1,0 +1,287 @@
+:root {
+  --bg: #111318;
+  --panel: #1a1d24;
+  --panel-2: #21252e;
+  --text: #e6e8ec;
+  --dim: #9aa0aa;
+  --accent: #4d8eff;
+  --accent-h: #6ba0ff;
+  --green: #3fcf8e;
+  --red: #ff6b6b;
+  --border: #2c313b;
+}
+
+* { box-sizing: border-box; }
+
+/* Thin scrollbars (the OS default is far too thick for the narrow popup). */
+* { scrollbar-width: thin; scrollbar-color: var(--panel-2) var(--bg); }
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--panel-2); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--border); }
+
+body {
+  width: 340px;
+  margin: 0;
+  font: 13px/1.4 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.title { font-weight: 600; }
+.header-actions { display: flex; align-items: center; gap: 4px; }
+/* Red stopwatch shown just left of the Lock link while auto-lock is disabled. */
+.autolock-off {
+  color: #ff4d4f;
+  font-size: 15px;
+  line-height: 1;
+  cursor: default;
+}
+
+section { padding: 12px; }
+
+label {
+  display: block;
+  margin-bottom: 10px;
+  color: var(--dim);
+  font-size: 12px;
+}
+input {
+  display: block;
+  width: 100%;
+  margin-top: 4px;
+  padding: 7px 8px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 13px;
+}
+input:focus { outline: none; border-color: var(--accent); }
+
+button {
+  cursor: pointer;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel-2);
+  color: var(--text);
+  padding: 7px 10px;
+  font-size: 13px;
+}
+button:hover { border-color: var(--accent); }
+button.accent { width: 100%; background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+button.accent:hover { background: var(--accent-h); }
+button.ghost { background: transparent; border-color: transparent; color: var(--dim); padding: 4px 8px; }
+button.ghost:hover { color: var(--text); border-color: var(--border); }
+button:disabled { opacity: 0.5; cursor: default; }
+
+/* Password show/hide */
+.pw-wrap { position: relative; display: block; }
+.pw-wrap input { padding-right: 34px; }
+.eye {
+  position: absolute;
+  top: 50%;
+  right: 4px;
+  transform: translateY(-50%);
+  border: none;
+  background: transparent;
+  padding: 2px 6px;
+  font-size: 14px;
+  line-height: 1;
+  opacity: 0.6;
+}
+.eye:hover { opacity: 1; border-color: transparent; }
+.eye.on { opacity: 1; }
+
+/* Unlock progress bar with travelling key */
+.progress { margin-top: 10px; }
+.progress-track {
+  position: relative;
+  height: 10px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.progress-fill {
+  height: 100%;
+  width: 0;
+  background: linear-gradient(90deg, var(--accent), var(--green));
+  border-radius: 6px;
+  transition: width 0.25s ease;
+}
+.progress-key {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  transform: translate(-50%, -50%);
+  font-size: 14px;
+  line-height: 1;
+  transition: left 0.25s ease;
+  filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.6));
+  animation: key-wiggle 0.9s ease-in-out infinite;
+}
+@keyframes key-wiggle {
+  0%, 100% { transform: translate(-50%, -50%) rotate(-12deg); }
+  50% { transform: translate(-50%, -50%) rotate(12deg); }
+}
+.progress-pct {
+  display: block;
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.status { margin: 8px 0 0; min-height: 16px; font-size: 12px; color: var(--dim); }
+.status.err { color: var(--red); }
+.status.ok { color: var(--green); }
+.meta { margin: 0 0 8px; color: var(--dim); font-size: 11px; }
+
+#filter { margin-bottom: 10px; }
+
+ul { list-style: none; margin: 0; padding: 0; max-height: 360px; overflow-y: auto; }
+/* Firefox does not repaint an inner overflow:auto scroll region inside an
+   extension popup (it leaves blank/un-painted areas past ~half the list); only
+   the popup's own document-level scroll paints reliably. On Firefox, drop the
+   list's internal scroll and let the whole popup scroll natively. Gated on the
+   .is-firefox root class (set in popup.js) so Chrome keeps its fixed-list scroll. */
+html.is-firefox #entries { max-height: none; overflow-y: visible; }
+li {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  margin-bottom: 6px;
+  background: var(--panel);
+  overflow: hidden;
+}
+li.match { border-color: var(--green); }
+li.expanded { border-color: var(--accent); }
+.entry-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 8px;
+}
+.entry-main { flex: 1; min-width: 0; cursor: pointer; }
+.entry-main:hover .entry-name { color: var(--accent-h); }
+.entry-name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+li.expanded .entry-name::before { content: "▾ "; color: var(--accent); }
+.entry-sub { color: var(--dim); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.entry-actions { display: flex; gap: 4px; flex-shrink: 0; }
+.entry-actions button { padding: 4px 7px; font-size: 12px; }
+.empty { color: var(--dim); text-align: center; padding: 16px 0; }
+
+/* Inline details panel (Display-Panel-style field rows) */
+.entry-details {
+  border-top: 1px solid var(--border);
+  background: var(--bg);
+  padding: 6px 8px;
+}
+.df-row {
+  display: flex;
+  gap: 8px;
+  padding: 3px 0;
+  align-items: baseline;
+}
+.df-label {
+  flex: 0 0 64px;
+  color: var(--dim);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.df-val { flex: 1; min-width: 0; display: flex; align-items: center; gap: 4px; }
+.df-val.multi { align-items: flex-start; }
+.df-text {
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+.df-val.multi .df-text { white-space: pre-wrap; }
+.df-val a { color: var(--accent); word-break: break-all; }
+.df-val a:hover { color: var(--accent-h); }
+.totp { font-variant-numeric: tabular-nums; color: var(--green); font-weight: 600; }
+.df-eye {
+  border: none;
+  background: transparent;
+  padding: 0 2px;
+  font-size: 12px;
+  line-height: 1;
+  opacity: 0.6;
+  flex-shrink: 0;
+}
+.df-eye:hover { opacity: 1; border-color: transparent; }
+
+/* About modal */
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: stretch;
+  justify-content: center;
+  z-index: 100;
+}
+.overlay[hidden] { display: none; }
+.modal {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  background: var(--bg);
+  max-height: 100%;
+}
+.modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.modal-title { font-weight: 600; }
+.modal-body { padding: 4px 12px 12px; overflow-y: auto; }
+
+.about-section { padding: 10px 0; border-bottom: 1px solid var(--border); }
+.about-section:last-child { border-bottom: none; }
+.about-section h3 {
+  margin: 0 0 6px;
+  font-size: 12px;
+  color: var(--green);
+  font-weight: 600;
+}
+.about-section p { margin: 0 0 6px; font-size: 12px; color: var(--text); }
+.about-section p.dim, .dim { color: var(--dim); }
+.about-section ul { margin: 0; padding-left: 16px; font-size: 12px; }
+.about-section label.chk { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text); cursor: pointer; }
+.about-section label.chk input { width: auto; margin: 0; }
+.about-section li { margin-bottom: 4px; border: none; background: none; border-radius: 0; overflow: visible; }
+.about-section a { color: var(--accent); text-decoration: none; }
+.about-section a:hover { color: var(--accent-h); }
+.about-section code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  background: var(--panel-2);
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+
+.cr-table { border-collapse: collapse; margin: 2px 0 4px; width: 100%; }
+.cr-table td { padding: 2px 6px 2px 0; vertical-align: middle; }
+.cr-name code { background: transparent; padding: 0; }
+.cr-tag { text-align: right; }
+.cr-aead, .cr-ctr {
+  display: inline-block;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  padding: 1px 5px;
+  border-radius: 3px;
+}
+.cr-aead { background: rgba(63, 207, 142, 0.18); color: var(--green); }
+.cr-ctr { background: var(--panel-2); color: var(--dim); }

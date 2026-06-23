@@ -1,12 +1,12 @@
 # Block direct access to data files and HTML templates.
 # index.html and javascript.js must remain publicly readable.
-<FilesMatch "^(lines|manifest|kdfparams|part1|part2)$">
+<FilesMatch "^(lines|trash|manifest|kdfparams|part1|part2)$">
     Require all denied
 </FilesMatch>
 
 # Apache 2.2 fallback
 <IfModule !mod_authz_core.c>
-    <Files ~ "^(lines|manifest|kdfparams|part1|part2)$">
+    <Files ~ "^(lines|trash|manifest|kdfparams|part1|part2)$">
         Order allow,deny
         Deny from all
     </Files>

@@ -1655,6 +1655,11 @@ var deleteEntryName  = null;
 // the record is gone.
 var deleteEntryRecord = null;
 var _editRecord       = null;
+// Snapshot of the entry being edited (password + history + age), captured in
+// editEntry() so saveEntry() reads a stable source even if the user decodes a
+// different entry (which mutates _decodedFields) before saving. Only consulted
+// while _editRecord !== null, which is set only by editEntry().
+var _editSnapshot     = null;
 var _decodedFields   = null;
 var currentPassword  = '';
 var _allEntries      = [];
@@ -1673,6 +1678,198 @@ var _mkCache = new Map();
 
 // v5: maps record key (pipe-joined fields without the line index) → decrypted name.
 var _v5Names = new Map();
+
+// Search index for "#tag" / "@note" queries: record key → { tags, notes } with
+// both lowercased. Populated when a payload is decrypted (reveal-all / decodeLine /
+// saveEntry) and cleared alongside _v5Names on lock. Lets #/@ search match tags or
+// notes vault-wide without re-decrypting, since reveal-all already derives every
+// record's keys.
+var _searchText = new Map();
+
+// Build the { tags, notes, extra } lowercased search-index entry from a decrypted
+// payload. `extra` flattens every custom field's label + value so a "!" search
+// matches either.
+function _searchIndex(fields) {
+    // Custom fields marked "secret" are excluded from the !field index so a
+    // masked value can't be surfaced by searching for it.
+    var extra = Array.isArray(fields.extra) ? fields.extra : [];
+    return {
+        tags:  (fields.tags  || '').toLowerCase(),
+        notes: (fields.notes || '').toLowerCase(),
+        extra: extra.filter(function(f) { return !f.secret; }).map(function(f) {
+            return (f.label || '') + ' ' + (f.value || '');
+        }).join(' ').toLowerCase()
+    };
+}
+
+// Normalize a comma-separated tags string: lowercase, trim, drop empties, dedupe.
+function _normalizeTags(str) {
+    var seen = {};
+    var out  = [];
+    (str || '').split(',').forEach(function(t) {
+        var tag = t.trim().toLowerCase();
+        if (tag && !Object.prototype.hasOwnProperty.call(seen, tag)) {
+            seen[tag] = true;
+            out.push(tag);
+        }
+    });
+    return out.join(', ');
+}
+
+// UI preference: group revealed entries under sticky A–Z (+ '#') headers.
+// Toggled by the #group-toggle checkbox, persisted per-instance in localStorage.
+// Default on. localStorage can throw (private browsing) — degrade to the default.
+var _groupEntries = true;
+function _groupStoreKey() {
+    return 'groupAZ:' + location.pathname.replace(/index\.html$/, '');
+}
+function _loadGroupPref() {
+    try {
+        var v = localStorage.getItem(_groupStoreKey());
+        if (v !== null) _groupEntries = (v === '1');
+    } catch (_) {}
+}
+function _saveGroupPref() {
+    try { localStorage.setItem(_groupStoreKey(), _groupEntries ? '1' : '0'); } catch (_) {}
+}
+
+// Light/dark theme. The palette lives entirely in CSS variables (body.theme-light
+// in part1), so toggling is just a class flip. Persisted per-instance, like the
+// Group A–Z preference. Default: dark.
+function _themeStoreKey() {
+    return 'theme:' + location.pathname.replace(/index\.html$/, '');
+}
+function _applyTheme(name) {
+    var light = (name === 'light');
+    // Class on <html> (not <body>) so the var overrides reach html { background }
+    // — the body is centered, so the strips beside it show the html background,
+    // which must follow the theme (matters most in a wide PWA window).
+    document.documentElement.classList.toggle('theme-light', light);
+    // Keep the PWA chrome (status/title bar + overscroll area, painted from the
+    // theme-color meta) in sync with the palette — otherwise it stays the fixed
+    // dark #111318 after switching to light, which reads as a stuck dark background.
+    var meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) meta.setAttribute('content', light ? '#f4f5f8' : '#111318');
+    var btn = document.getElementById('theme-btn');
+    if (btn) {
+        btn.textContent = light ? '☀︎' : '🌙︎';
+        btn.setAttribute('data-tip', light ? 'Switch to dark theme' : 'Switch to light theme');
+    }
+    try { localStorage.setItem(_themeStoreKey(), light ? 'light' : 'dark'); } catch (_) {}
+}
+function _loadTheme() {
+    var name = 'dark';
+    try { if (localStorage.getItem(_themeStoreKey()) === 'light') name = 'light'; } catch (_) {}
+    _applyTheme(name);
+}
+function toggleTheme() {
+    _applyTheme(document.documentElement.classList.contains('theme-light') ? 'dark' : 'light');
+}
+
+// UI preference: disable the inactivity auto-lock entirely. Toggled by the
+// #autolock-disable-toggle checkbox (About > Auto-lock). Persisted per-instance
+// in localStorage, like the Group A–Z / theme preferences — fully sticky: it
+// survives both page reloads and vault locks (manual lock, double-Escape, and
+// auto-lock itself no longer force it back on). Because a stale "disabled"
+// choice would otherwise carry forward invisibly, every fresh page load that
+// finds it already disabled re-runs the same confirm dialog as a fresh
+// toggle-on (see the init code), so the risk is re-acknowledged each session
+// rather than just inherited.
+var _autolockDisabled = false;
+function _updateAutolockStatus() {
+    var el = document.getElementById('autolock-status');
+    if (el) el.style.display = _autolockDisabled ? '' : 'none';
+}
+function _autolockStoreKey() {
+    return 'autolockDisabled:' + location.pathname.replace(/index\.html$/, '');
+}
+function _loadAutolockPref() {
+    try {
+        var v = localStorage.getItem(_autolockStoreKey());
+        if (v !== null) _autolockDisabled = (v === '1');
+    } catch (_) {}
+}
+function _saveAutolockPref() {
+    try { localStorage.setItem(_autolockStoreKey(), _autolockDisabled ? '1' : '0'); } catch (_) {}
+}
+
+// ── Favorites ──────────────────────────────────────────────────────────────
+// Favorited entries sort to the top of the grid (under a ★ group header when
+// grouping is on). The preference is per-instance in localStorage, keyed by a
+// non-reversible hash of the entry name — NOT the plaintext name — so the at-rest
+// confidentiality of names (encrypted in `lines`) is not undone by a localStorage
+// leak. The hash is a fast FNV-1a (a local UI identifier, not a security control);
+// collisions are astronomically unlikely for a personal vault and at worst would
+// co-favorite two names. Favorites survive entry edits (which mint a fresh record
+// string) because they key on the name, not the ciphertext.
+var _favSet = null;   // Set<string> of name-hashes; lazily loaded
+function _favStoreKey() {
+    return 'fav:' + location.pathname.replace(/index\.html$/, '');
+}
+function _favHash(name) {
+    var h = 0x811c9dc5;
+    var s = String(name);
+    for (var i = 0; i < s.length; i++) {
+        h ^= s.charCodeAt(i);
+        h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
+    }
+    return ('00000000' + h.toString(16)).slice(-8);
+}
+function _favs() {
+    if (_favSet === null) {
+        _favSet = new Set();
+        try {
+            var raw = localStorage.getItem(_favStoreKey());
+            if (raw) { var arr = JSON.parse(raw); if (Array.isArray(arr)) _favSet = new Set(arr); }
+        } catch (_) {}
+    }
+    return _favSet;
+}
+function _saveFavs() {
+    try { localStorage.setItem(_favStoreKey(), JSON.stringify(Array.from(_favs()))); } catch (_) {}
+}
+function _isFav(name) {
+    return !!name && _favs().has(_favHash(name));
+}
+// Toggle the favorite state of the currently-decoded entry.
+function toggleFavorite() {
+    if (!_decodedFields || !_decodedFields.name) { showToast('Open an entry first'); return; }
+    var key = _favHash(_decodedFields.name);
+    var set = _favs();
+    var nowFav = !set.has(key);
+    if (nowFav) set.add(key); else set.delete(key);
+    _saveFavs();
+    _updateFavBtn();
+    _markFavButtons();
+    _sortEntryGrid();
+    showToast(nowFav ? '★ Added to favorites' : 'Removed from favorites');
+}
+// Sync the decode-panel star button to the current entry's favorite state.
+function _updateFavBtn() {
+    var btn = document.getElementById('fav-btn');
+    if (!btn) return;
+    // Always show the star in the display panel. With no entry open it renders as
+    // an inert ☆ (clicking it just prompts to open an entry).
+    btn.style.display = '';
+    if (!_decodedFields || !_decodedFields.name) {
+        btn.classList.remove('is-fav');
+        btn.textContent = '☆';
+        btn.title = 'Add to favorites (F)';
+        return;
+    }
+    var fav = _isFav(_decodedFields.name);
+    btn.classList.toggle('is-fav', fav);
+    btn.textContent = fav ? '★' : '☆';   // ★ / ☆
+    btn.title = fav ? 'Remove from favorites (F)' : 'Add to favorites (F)';
+}
+// Tag each revealed entry button with .entry-fav so the sort/grouping can pin
+// favorites to the top. Hidden (still-locked) buttons have no plaintext name yet.
+function _markFavButtons() {
+    document.querySelectorAll('.entry-grid .entry-btn').forEach(function(b) {
+        if (b.style.display === 'none') { b.classList.remove('entry-fav'); return; }
+        b.classList.toggle('entry-fav', _isFav(_btnName(b)));
+    });
+}
 
 // Reveal-all coordination. _revealGen is bumped whenever the revealed state is
 // invalidated (key edit / lock); an in-flight _revealAllV5Names loop captures the
@@ -1843,6 +2040,13 @@ function _initVaultKdf() {
 // re-encrypting them (Vault Tools → Re-encrypt) brings them up to the new scheme.
 var PAYLOAD_PAD_BUCKET = 256; // bytes
 
+// Password history: how many previous passwords to retain per entry (stored in
+// the encrypted payload JSON, newest first). Old ones beyond this are dropped.
+var HISTORY_MAX = 20;
+// Password-age audit: flag entries whose password has not changed in this many
+// days. Only entries that carry a pwModified timestamp can be aged.
+var _PW_AGE_WARN_DAYS = 365;
+
 // HKDF info labels — distinct per derived subkey so they are cryptographically
 // independent despite sharing a master key.
 var _HK = {
@@ -1872,7 +2076,7 @@ var _HK = {
 // thread without losing the password/salt buffers.
 // ============================================================
 
-var _ARGON_POOL_MAX = 16;         // hard cap on worker count (CPU-bound ceiling)
+var _ARGON_POOL_MAX = 24;         // hard cap on worker count (CPU-bound ceiling)
 var _ARGON_POOL_MAX_MOBILE = 2;   // tighter cap on phones/tablets (limited RAM + thermals)
 var _argonPool      = null;       // [{ worker, busy }] once initialised
 var _argonQueue     = [];         // pending { password, salt, opts, resolve, reject }
@@ -1880,6 +2084,14 @@ var _argonJobSeq    = 0;
 var _argonJobs      = new Map();   // job id → { resolve, reject, slot }
 var _argonWorkersOK = true;        // flips false permanently if Workers can't be used
 var _ARGON_RETRIES  = 2;          // transient-failure retries before giving up
+// Watchdog: a worker that is OOM-killed or wedged often dies WITHOUT firing
+// worker.onerror, so its job would never settle and Promise.all() in reveal-all
+// would hang forever (strength bar never hides, integrity never verifies). If a
+// dispatched job gets no reply within this window we treat the worker as dead,
+// terminate+replace it, and reject the job so _argonDerive retries (fresh worker
+// or main-thread fallback). Generous so a merely-slow heavy derivation (up to
+// m=1 GiB / t=10 on a slow device) is never falsely killed.
+var _ARGON_JOB_TIMEOUT_MS = 60000;
 
 // Pool size scales with CPU cores (all reported cores, hard max _ARGON_POOL_MAX)
 // BUT is also bounded by a memory budget: each busy worker holds its own ~128 MiB
@@ -1943,8 +2155,11 @@ function _terminateArgonPool() {
     _argonPool = null;
     if (pool) pool.forEach(function (s) { try { s.worker.terminate(); } catch (_) {} });
     // Anything still in flight/queued can never complete now — reject so callers
-    // fall back to the main thread.
-    _argonJobs.forEach(function (j) { j.reject(new Error('argon2 pool terminated')); });
+    // fall back to the main thread (and cancel each job's watchdog first).
+    _argonJobs.forEach(function (j) {
+        if (j.timer) clearTimeout(j.timer);
+        j.reject(new Error('argon2 pool terminated'));
+    });
     _argonJobs.clear();
     var q = _argonQueue; _argonQueue = [];
     q.forEach(function (j) { j.reject(new Error('argon2 pool terminated')); });
@@ -1954,6 +2169,7 @@ function _onArgonWorkerMessage(e) {
     var d   = e.data;
     var job = _argonJobs.get(d.id);
     if (!job) return;
+    if (job.timer) clearTimeout(job.timer);
     _argonJobs.delete(d.id);
     job.slot.busy = false;
     if (d.error) job.reject(new Error(d.error));
@@ -1976,10 +2192,44 @@ function _drainArgonQueue() {
         var job = _argonQueue.shift();
         var id  = ++_argonJobSeq;
         slot.busy = true;
-        _argonJobs.set(id, { resolve: job.resolve, reject: job.reject, slot: slot });
+        var timer = setTimeout(_onArgonJobTimeout.bind(null, id), _ARGON_JOB_TIMEOUT_MS);
+        _argonJobs.set(id, { resolve: job.resolve, reject: job.reject, slot: slot, timer: timer });
         slot.worker.postMessage({ id: id, password: job.password, salt: job.salt, opts: job.opts });
     }
     _updateWorkerCount();
+}
+
+// A dispatched job exceeded _ARGON_JOB_TIMEOUT_MS with no reply — the worker is
+// wedged or was silently killed. Replace it (so the slot isn't lost and a late
+// reply from the dead worker can't land on a reused id) and reject the job so
+// _argonDerive retries on a fresh worker or the main thread.
+function _onArgonJobTimeout(id) {
+    var job = _argonJobs.get(id);
+    if (!job) return;                    // already completed in the meantime
+    _argonJobs.delete(id);
+    _replaceArgonWorker(job.slot);
+    job.reject(new Error('argon2 worker timeout'));
+    _drainArgonQueue();
+    _updateWorkerCount();
+}
+
+// Terminate a wedged worker and spin up a fresh one in the same pool slot. If the
+// respawn fails, drop the slot; if that empties the pool, disable workers for the
+// session (subsequent derivations fall back to the main thread).
+function _replaceArgonWorker(slot) {
+    try { slot.worker.terminate(); } catch (_) {}
+    slot.busy = false;
+    if (!_argonPool) return;
+    try {
+        var w = new Worker('argon2-worker.js');
+        w.onmessage = _onArgonWorkerMessage;
+        w.onerror   = _onArgonWorkerError;
+        slot.worker = w;
+    } catch (_) {
+        var idx = _argonPool.indexOf(slot);
+        if (idx >= 0) _argonPool.splice(idx, 1);
+        if (!_argonPool.length) { _argonWorkersOK = false; _argonPool = null; }
+    }
 }
 
 function _argonDispatch(passwordBytes, saltBytes, opts) {
@@ -2107,11 +2357,13 @@ async function encryptFields(password, password2, recSalt1, recSalt2, fields, kd
     var ct    = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv: iv1 }, aesKey, mid));
     var tf    = twofishCTR(twofishKey, nonce3, ct);
     var outer = serpentCTR(serpentKey, nonce4, tf);
-    return {
+    var out   = {
         iv1Hex:    bytesToHex(iv1),    nonce2Hex: bytesToHex(nonce2),
         nonce3Hex: bytesToHex(nonce3), nonce4Hex: bytesToHex(nonce4),
         encHex:    bytesToHex(outer)
     };
+    _wipe(plain, mid, chachaKey, twofishKey, serpentKey);  // aesKey is a non-extractable CryptoKey; mk1/mk2 are cached
+    return out;
 }
 
 // Throws on wrong key or tampered ciphertext — caller must catch.
@@ -2132,7 +2384,9 @@ async function decryptFields(password, password2, recSalt1Hex, recSalt2Hex, iv1H
     var ct    = twofishCTR(twofishKey, hexToBytes(nonce3Hex), tf);
     var mid   = new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: hexToBytes(iv1Hex) }, aesKey, ct));
     var plain = chacha20poly1305(chachaKey, hexToBytes(nonce2Hex)).decrypt(mid);
-    return JSON.parse(_TD.decode(plain));
+    var out   = JSON.parse(_TD.decode(plain));
+    _wipe(plain, mid, ct, tf, serpentKey, twofishKey, chachaKey);  // mk1/mk2 are cached; the JSON string fields can't be wiped
+    return out;
 }
 
 // v6 name encryption: AES-256-GCM (MK1) then ChaCha20-Poly1305 (MK2).
@@ -2153,6 +2407,32 @@ async function encryptName(password, password2, recSalt1, recSalt2, name, kdf) {
     };
 }
 
+// Assemble the 11-field v6 record string from the name + payload ciphertext
+// objects and the two raw record salts (Uint8Array). The single source of truth
+// for field order (mirrors decodeLine / post.php is_valid_record) — used by every
+// encrypt path: saveEntry, the whole-vault re-encrypt flows (password / KDF
+// change), bulk-tag, and the CSV/KeePass/1Password importers.
+function _assembleRecord(nameEnc, result, recSalt1, recSalt2) {
+    return [nameEnc.encNameHex, 'v6',
+            bytesToHex(recSalt1),   bytesToHex(recSalt2),
+            nameEnc.nameNonce1Hex,  nameEnc.nameNonce2Hex,
+            result.iv1Hex,          result.nonce2Hex,
+            result.nonce3Hex,       result.nonce4Hex,
+            result.encHex].join('|');
+}
+
+// Best-effort wipe of raw Uint8Array key/plaintext material after use. NOTE: JS
+// strings are immutable and cannot be zeroed, so the decrypted field strings in
+// `fields` / `_decodedFields` still live until GC — this only covers byte buffers
+// (symmetric subkeys + plaintext). It deliberately never touches the Argon2id
+// master keys: those are shared `_mkCache` references, wiped wholesale on lock.
+function _wipe() {
+    for (var i = 0; i < arguments.length; i++) {
+        var b = arguments[i];
+        if (b && typeof b.fill === 'function') b.fill(0);
+    }
+}
+
 // v6 name decryption. Throws on wrong key or tampered ciphertext.
 async function decryptName(password, password2, recSalt1Hex, recSalt2Hex, nameNonce1Hex, nameNonce2Hex, encNameHex, kdf) {
     var mks = await Promise.all([
@@ -2169,7 +2449,7 @@ async function decryptName(password, password2, recSalt1Hex, recSalt2Hex, nameNo
 }
 
 // ============================================================
-// TOTP — RFC 6238 via WebCrypto HMAC-SHA-1
+// TOTP — RFC 6238 via WebCrypto HMAC (SHA-1/256/512) + Steam Guard
 // ============================================================
 
 function base32ToBytes(base32) {
@@ -2188,48 +2468,103 @@ function base32ToBytes(base32) {
     return bytes;
 }
 
-// timeOffset: 0 = current window, -1 or +1 for clock-drift tolerance.
-async function computeTotp(base32Secret, timeOffset) {
+// Normalize an otpauth algorithm token ("SHA1"/"sha256"/…) to a WebCrypto name.
+function _normOtpAlg(a) {
+    a = (a || '').toUpperCase().replace(/^SHA([0-9])/, 'SHA-$1');
+    return (a === 'SHA-256' || a === 'SHA-512') ? a : 'SHA-1';
+}
+
+// Steam Guard codes are 5 chars drawn from this 26-symbol alphabet.
+var _STEAM_ALPHABET = '23456789BCDFGHJKMNPQRTVWXY';
+
+// Parse a stored TOTP token into a config object. The token is either a bare
+// Base32 secret (the legacy/common case, defaults: 6 digits, 30s, SHA-1) or a
+// full `otpauth://` URI carrying digits/period/algorithm. Steam Guard is
+// detected from the URI host/issuer/label or an `encoder=steam` param and
+// switches to the 5-char base-26 alphabet.
+function _parseOtp(token) {
+    var cfg = { secret: '', digits: 6, period: 30, algorithm: 'SHA-1', steam: false };
+    var raw = (token || '').trim();
+    if (/^otpauth:\/\//i.test(raw)) {
+      try {
+        var u = new URL(raw);
+        var p = u.searchParams;
+        cfg.secret = (p.get('secret') || '').toUpperCase().replace(/\s+/g, '');
+        if (p.get('digits')) cfg.digits = parseInt(p.get('digits'), 10) || cfg.digits;
+        if (p.get('period')) cfg.period = parseInt(p.get('period'), 10) || cfg.period;
+        if (p.get('algorithm')) cfg.algorithm = _normOtpAlg(p.get('algorithm'));
+        var label  = decodeURIComponent(u.pathname.slice(1)).toLowerCase();
+        var issuer = (p.get('issuer') || '').toLowerCase();
+        var host   = (u.host || '').toLowerCase();           // otpauth://steam/…
+        if ((p.get('encoder') || '').toLowerCase() === 'steam' ||
+            issuer === 'steam' || host === 'steam' || label.indexOf('steam') === 0) {
+            cfg.steam = true;
+            cfg.digits = 5;
+            cfg.algorithm = 'SHA-1';
+        }
+      } catch (_) { /* malformed otpauth URI — leave secret empty, surfaces as a stopped timer */ }
+    } else {
+        cfg.secret = raw.toUpperCase().replace(/\s+/g, '');
+    }
+    return cfg;
+}
+
+// computeTotp(tokenOrCfg, timeOffset) — accepts a raw token string or an
+// already-parsed _parseOtp() config. timeOffset: 0 = current window, ±1 for
+// clock-drift tolerance. Honors digits/period/algorithm and Steam Guard.
+async function computeTotp(token, timeOffset) {
     timeOffset = timeOffset || 0;
-    var keyBytes = base32ToBytes(base32Secret);
+    var cfg = (token && token.secret !== undefined) ? token : _parseOtp(token);
+    var keyBytes = base32ToBytes(cfg.secret);
     var ck = await crypto.subtle.importKey(
-        'raw', keyBytes, { name: 'HMAC', hash: 'SHA-1' }, false, ['sign']
+        'raw', keyBytes, { name: 'HMAC', hash: cfg.algorithm }, false, ['sign']
     );
     var epoch   = Math.floor(Date.now() / 1000);
-    var counter = Math.floor(epoch / 30) + timeOffset;
+    var counter = Math.floor(epoch / cfg.period) + timeOffset;
     var timeBytes = new Uint8Array(8);
-    timeBytes[4] = (counter >>> 24) & 0xff;
-    timeBytes[5] = (counter >>> 16) & 0xff;
-    timeBytes[6] = (counter >>>  8) & 0xff;
-    timeBytes[7] =  counter         & 0xff;
+    // 64-bit big-endian counter (high word is non-zero only past year 2106).
+    var hi = Math.floor(counter / 0x100000000);
+    var lo = counter >>> 0;
+    timeBytes[0] = (hi >>> 24) & 0xff; timeBytes[1] = (hi >>> 16) & 0xff;
+    timeBytes[2] = (hi >>>  8) & 0xff; timeBytes[3] =  hi         & 0xff;
+    timeBytes[4] = (lo >>> 24) & 0xff; timeBytes[5] = (lo >>> 16) & 0xff;
+    timeBytes[6] = (lo >>>  8) & 0xff; timeBytes[7] =  lo         & 0xff;
     var hmac   = new Uint8Array(await crypto.subtle.sign('HMAC', ck, timeBytes));
-    var offset = hmac[19] & 0x0f;
-    var code   = ((hmac[offset]     & 0x7f) << 24 |
+    var offset = hmac[hmac.length - 1] & 0x0f;   // RFC 4226 dynamic truncation
+    var bin    = ((hmac[offset]     & 0x7f) << 24 |
                    hmac[offset + 1]         << 16 |
                    hmac[offset + 2]         <<  8 |
-                   hmac[offset + 3])         % 1000000;
-    return code.toString().padStart(6, '0');
+                   hmac[offset + 3]) >>> 0;
+    if (cfg.steam) {
+        var out = '';
+        for (var i = 0; i < 5; i++) { out += _STEAM_ALPHABET[bin % 26]; bin = Math.floor(bin / 26); }
+        return out;
+    }
+    var code = bin % Math.pow(10, cfg.digits);
+    return code.toString().padStart(cfg.digits, '0');
 }
 
 async function updateOtp() {
-    if (!otpKey) return;
+    if (!_otpCfg) return;
     try {
-        var code = await computeTotp(otpKey, 0);
+        var code = await computeTotp(_otpCfg, 0);
         document.getElementById('otp').textContent = code;
     } catch (e) {
         stopOtpTimer();
     }
 }
 
-function _setOtpArc(countdown) {
+function _setOtpArc(countdown, period) {
+    period = period || 30;
+    var warn = Math.min(10, period);   // last-N-seconds color ramp
     var arc = document.getElementById('otp-arc');
     if (!arc) return;
-    arc.style.strokeDashoffset = (50.27 * (1 - countdown / 30)).toFixed(2);
-    // Green above 10 s; green → yellow-orange → red over the last 10 s
-    if (countdown > 10) {
+    arc.style.strokeDashoffset = (50.27 * (1 - countdown / period)).toFixed(2);
+    // Green above the warn window; green → yellow-orange → red over the last N s
+    if (countdown > warn) {
         arc.style.stroke = '';   // fall back to SVG attribute (var(--green))
     } else {
-        var t   = 1 - countdown / 10;              // 0 at 10 s, 1 at 0 s
+        var t   = 1 - countdown / warn;            // 0 at warn s, 1 at 0 s
         var hue = Math.round(152 - 152 * t);       // 152 (teal-green) → 0 (red)
         var sat = Math.round(59  +  41 * t) + '%'; // 59% → 100%
         var lit = Math.round(53  +  13 * t) + '%'; // 53% → 66%
@@ -2241,23 +2576,27 @@ function _setOtpArc(countdown) {
 // triggered whenever the window changes rather than only on the exact boundary
 // second — which a throttled/drifting 1s interval can skip over entirely.
 var _otpWindow = -1;
+var _otpCfg    = null;   // parsed _parseOtp() config for the active entry
 
 function tick() {
+    var period    = (_otpCfg && _otpCfg.period) || 30;
     var epoch     = Math.floor(Date.now() / 1000);
-    var countdown = 30 - (epoch % 30);
+    var countdown = period - (epoch % period);
     document.getElementById('updatingIn').textContent = countdown;
-    _setOtpArc(countdown);
-    var win = Math.floor(epoch / 30);
+    _setOtpArc(countdown, period);
+    var win = Math.floor(epoch / period);
     if (win !== _otpWindow) { _otpWindow = win; updateOtp(); }
 }
 
 function startOtpTimer() {
+    _otpCfg = _parseOtp(otpKey);
+    var period = _otpCfg.period || 30;
     var epoch = Math.floor(Date.now() / 1000);
-    _otpWindow = Math.floor(epoch / 30);
+    _otpWindow = Math.floor(epoch / period);
     updateOtp();
-    var countdown = 30 - (epoch % 30);
+    var countdown = period - (epoch % period);
     document.getElementById('updatingIn').textContent = countdown;
-    _setOtpArc(countdown);
+    _setOtpArc(countdown, period);
     var ring = document.getElementById('otp-ring');
     if (ring) ring.style.display = 'block';
     timerVar = setInterval(tick, 1000);
@@ -2266,6 +2605,7 @@ function startOtpTimer() {
 function stopOtpTimer() {
     clearInterval(timerVar);
     timerVar = null;
+    _otpCfg  = null;
     document.getElementById('otp').textContent        = '------';
     document.getElementById('updatingIn').textContent = '--';
     var ring = document.getElementById('otp-ring');
@@ -2276,12 +2616,31 @@ function stopOtpTimer() {
 // Clipboard
 // ============================================================
 
-function showToast(msg) {
+// showToast(msg) — plain transient toast.
+// showToast(msg, { actionLabel, onAction, duration }) — adds a clickable action
+// button (e.g. "Undo") and keeps the toast up for `duration` ms (default 1800).
+function showToast(msg, opts) {
+    opts = opts || {};
     var el = document.getElementById('toast');
-    el.textContent = msg;
+    el.textContent = msg;            // also clears any button from a prior toast
+    el.classList.remove('actionable');
+    if (opts.actionLabel) {
+        var btn = document.createElement('button');
+        btn.className   = 'toast-action';
+        btn.textContent = opts.actionLabel;
+        btn.onclick = function() {
+            el.classList.remove('show', 'actionable');
+            clearTimeout(_toastTimer);
+            if (typeof opts.onAction === 'function') opts.onAction();
+        };
+        el.appendChild(btn);
+        el.classList.add('actionable');
+    }
     el.classList.add('show');
     clearTimeout(_toastTimer);
-    _toastTimer = setTimeout(function() { el.classList.remove('show'); }, 1800);
+    _toastTimer = setTimeout(function() {
+        el.classList.remove('show', 'actionable');
+    }, opts.duration || 1800);
 }
 
 // Tracks whether the clipboard currently holds a secret we copied, so that
@@ -2438,8 +2797,14 @@ async function _decodeQRFromFile(file) {
 
         var tokenEl = document.getElementById('token');
         tokenEl.removeAttribute('readonly');
-        tokenEl.value = secret.toUpperCase().replace(/\s+/g, '');
-        showToast('TOTP secret scanned ✓');
+        // Keep just the Base32 secret for plain TOTP; preserve the full
+        // otpauth:// URI when it carries non-default params or is Steam Guard,
+        // so digits/period/algorithm survive the round-trip.
+        var cfg = _parseOtp(raw);
+        var isDefault = !cfg.steam && cfg.digits === 6 && cfg.period === 30 &&
+                        cfg.algorithm === 'SHA-1';
+        tokenEl.value = isDefault ? cfg.secret : raw;
+        showToast(cfg.steam ? 'Steam Guard secret scanned ✓' : 'TOTP secret scanned ✓');
 
     } catch (e) {
         showToast('QR scan error: ' + e.message);
@@ -2476,6 +2841,10 @@ function resizeFreezePane() {
         }
     }
     content.style.marginTop = h + 'px';
+    // Sticky letter-group headers sit just below the fixed decode panel. In
+    // wide-controls mode the panel floats left and the list scrolls under the
+    // top edge (offset 0); narrow mode has the full-width panel on top (offset h).
+    document.body.style.setProperty('--sticky-top', (wide ? 0 : h) + 'px');
 }
 
 var _selectedBtn = null;
@@ -2656,6 +3025,356 @@ function setNotes(text) {
     if (delta) window.scrollBy(0, delta);
 }
 
+// Show/hide the decode-panel Tags row. Like setNotes, toggling it changes the
+// fixed panel height, so compensate the scroll position to keep the entry list
+// visually stationary.
+function _setDecTags(text) {
+    var row = document.getElementById('dectags-row');
+    var el  = document.getElementById('dectags');
+    if (!row || !el) return;
+    // Render each tag as its own clickable chip — clicking opens the search
+    // popup scoped to that tag (#tag). Tags are stored comma-separated.
+    el.textContent = '';
+    var tags = (text || '').split(',').map(function(t) { return t.trim(); })
+                           .filter(function(t) { return t; });
+    if (tags.length) {
+        tags.forEach(function(tag, i) {
+            var chip = document.createElement('span');
+            chip.className   = 'dec-tag';
+            chip.textContent = tag;
+            chip.title       = 'Search tag \u201c' + tag + '\u201d';
+            chip.onclick     = function() { _searchTag(tag); };
+            el.appendChild(chip);
+            if (i < tags.length - 1) el.appendChild(document.createTextNode(', '));
+        });
+    } else {
+        el.textContent = ' ';
+    }
+    var content = document.getElementById('content');
+    var oldTop  = content.getBoundingClientRect().top;
+    row.style.display = tags.length ? '' : 'none';
+    resizeFreezePane();
+    var delta = content.getBoundingClientRect().top - oldTop;
+    if (delta) window.scrollBy(0, delta);
+}
+
+// Open the search popup pre-filled with a tag-scoped query (#tag) and run it.
+function _searchTag(tag) {
+    showSearch();   // resets #search-input to '' and focuses it
+    var inp = document.getElementById('search-input');
+    if (!inp) return;
+    inp.value = '#' + tag;
+    filterSearch(inp.value);
+}
+
+// ── Custom fields (entry form) ──────────────────────────────────────────────
+// Arbitrary extra label/value pairs stored inside the encrypted payload JSON as
+// fields.extra = [{label, value, secret}] — NOT a new record field, so the v6
+// format is unchanged and custom fields are as protected as any other secret.
+// `secret:true` masks the value in the decode panel (click to copy).
+function _addExtraFieldRow(label, value, secret) {
+    var wrap = document.getElementById('extra-fields');
+    if (!wrap) return;
+    var row = document.createElement('div');
+    row.className = 'xf-row';
+    var lab = document.createElement('input');
+    lab.className = 'finput xf-label';
+    lab.type = 'text';
+    lab.placeholder = 'Label';
+    lab.setAttribute('aria-label', 'Custom field label');
+    lab.value = label || '';
+    var val = document.createElement('input');
+    val.className = 'finput xf-value';
+    val.type = 'text';
+    val.placeholder = 'Value';
+    val.setAttribute('aria-label', 'Custom field value');
+    val.value = value || '';
+    var sec = document.createElement('label');
+    sec.className = 'xf-secret';
+    sec.title = 'Hide this value in the panel (click to reveal/copy)';
+    var cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = !!secret;
+    sec.appendChild(cb);
+    sec.appendChild(document.createTextNode(' secret'));
+    var del = document.createElement('button');
+    del.className = 'btn-sm xf-del';
+    del.type = 'button';
+    del.textContent = '✕';   // ✕
+    del.title = 'Remove field';
+    del.onclick = function() { row.remove(); };
+    row.appendChild(lab);
+    row.appendChild(val);
+    row.appendChild(sec);
+    row.appendChild(del);
+    wrap.appendChild(row);
+    return lab;
+}
+// Read the custom-field rows back into an array, dropping fully-empty rows.
+function _collectExtraFields() {
+    var out = [];
+    document.querySelectorAll('#extra-fields .xf-row').forEach(function(row) {
+        var label = row.querySelector('.xf-label').value.trim();
+        var value = row.querySelector('.xf-value').value;
+        var secret = row.querySelector('.xf-secret input').checked;
+        if (label === '' && value === '') return;
+        out.push({ label: label, value: value, secret: secret });
+    });
+    return out;
+}
+// Replace the form's custom-field rows with the given array (used by edit/cancel).
+function _populateExtraFields(arr) {
+    var wrap = document.getElementById('extra-fields');
+    if (!wrap) return;
+    wrap.innerHTML = '';
+    (Array.isArray(arr) ? arr : []).forEach(function(f) {
+        _addExtraFieldRow(f.label, f.value, f.secret);
+    });
+}
+
+// ── Copy arbitrary text (custom field / password-history value) ─────────────
+// Mirrors doCBCopy's clipboard-dirty + auto-clear arming for one-off values.
+function _copyValue(text, label) {
+    if (!text) { showToast('Nothing to copy'); return; }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).catch(function() { _fallbackCopy(text); });
+    } else {
+        _fallbackCopy(text);
+    }
+    _clipboardDirty = true;
+    clearTimeout(_clipClearTimer);
+    _clipClearTimer = setTimeout(function() {
+        _clearClipboardIfDirty();
+        showToast('Clipboard cleared');
+    }, _CLIP_CLEAR_MS);
+    showToast(label || 'Copied');
+}
+
+// Short local date for history / trash timestamps (accepts unix seconds).
+function _fmtDate(sec) {
+    try {
+        var d = new Date(sec * 1000);
+        var pad = function(n) { return String(n).padStart(2, '0'); };
+        return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+    } catch (_) { return ''; }
+}
+
+// Verbose calendar age from a unix-seconds timestamp to now, e.g.
+// "1 year, 2 months and 5 days", "3 months and 12 days", "4 days". Uses
+// calendar arithmetic (not fixed 30-day months) so it lines up with the dates.
+function _ageBreakdown(sec) {
+    var now  = new Date();
+    var then = new Date(sec * 1000);
+    if (then > now) return 'today';
+    var years  = now.getFullYear() - then.getFullYear();
+    var months = now.getMonth() - then.getMonth();
+    var days   = now.getDate() - then.getDate();
+    if (days < 0) {
+        // borrow days from the previous (now-relative) month
+        days += new Date(now.getFullYear(), now.getMonth(), 0).getDate();
+        months--;
+    }
+    if (months < 0) { months += 12; years--; }
+    var parts = [];
+    if (years)  parts.push(years  + (years  === 1 ? ' year'  : ' years'));
+    if (months) parts.push(months + (months === 1 ? ' month' : ' months'));
+    if (days)   parts.push(days   + (days   === 1 ? ' day'   : ' days'));
+    if (!parts.length) return 'today';
+    if (parts.length === 1) return parts[0];
+    return parts.slice(0, -1).join(', ') + ' and ' + parts[parts.length - 1];
+}
+
+// Resolve the currently decoded entry's last-modification date into the compact
+// "YYYY-MM-DD" shown in the Modified column, plus a "Created: … / Age: …"
+// tooltip. The modified date is `pwModified` (stamped on create and on every
+// password change), falling back to the creation date when absent. The creation
+// date itself uses the `created` stamp when present; for legacy entries that
+// predate it, it falls back (best-effort) to the oldest password-history
+// timestamp, then to pwModified — both upper bounds on the true creation time,
+// so the tooltip prefixes "≤ " and phrases the age "at least …". Returns "—" /
+// no tooltip when no timestamp exists at all.
+function _decModified() {
+    var f = _decodedFields;
+    if (!f) return { text: '—', tip: '' };
+    var created = (typeof f.created === 'number') ? f.created : null;
+    var approx  = false;
+    if (created === null && Array.isArray(f.history) && f.history.length) {
+        var oldest = f.history[f.history.length - 1];
+        if (oldest && typeof oldest.t === 'number') { created = oldest.t; approx = true; }
+    }
+    if (created === null && typeof f.pwModified === 'number') {
+        created = f.pwModified; approx = true;
+    }
+    var modified = (typeof f.pwModified === 'number') ? f.pwModified : created;
+    if (modified === null) return { text: '—', tip: '' };
+    var tip = '';
+    if (created !== null) {
+        tip = 'Created: ' + (approx ? '≤ ' : '') + _fmtDate(created) +
+              ' / Age: '  + (approx ? 'at least ' : '') + _ageBreakdown(created);
+    }
+    return { text: _fmtDate(modified), tip: tip };
+}
+
+// Populate the Modified column on the Password line from the decoded entry,
+// including its hover tooltip showing the creation date and the entry's age.
+function _setDecModified() {
+    var el = document.getElementById('decmodified');
+    if (!el) return;
+    var info = _decModified();
+    el.textContent = info.text;
+    // The tooltip lives on the column container, not the value span — the span
+    // has overflow:hidden (for the ellipsis), which would clip the ::after.
+    var col = document.getElementById('decmodified-col');
+    if (col) {
+        if (info.tip) col.setAttribute('data-tip', info.tip);
+        else          col.removeAttribute('data-tip');
+    }
+}
+
+// ── Decode-panel render of custom fields + password history ─────────────────
+// Both rows live in the fixed panel, so their height changes the layout —
+// resizeFreezePane() is called after (re)building them.
+function _renderDecExtras() {
+    var exRow = document.getElementById('decextra-row');
+    var exBox = document.getElementById('decextra');
+    var hiRow = document.getElementById('dechistory-row');
+    var hiBox = document.getElementById('dechistory');
+    var hiToggle = document.getElementById('dechistory-toggle');
+    if (exBox) exBox.innerHTML = '';
+    if (hiBox) hiBox.innerHTML = '';
+
+    var f = _decodedFields;
+    var extra   = f && Array.isArray(f.extra)   ? f.extra   : [];
+    var history = f && Array.isArray(f.history) ? f.history : [];
+
+    function copyRow(label, valueProvider, masked, copyMsg) {
+        var row = document.createElement('div');
+        row.className = 'field xf-dec';
+        row.setAttribute('data-tip', 'Click to copy');
+        var txt = document.createElement('div');
+        txt.className = 'field-text';
+        var lbl = document.createElement('span');
+        lbl.className = 'flbl';
+        lbl.textContent = label;
+        var vEl = document.createElement('span');
+        vEl.className = 'fval';
+        vEl.textContent = masked ? '••••••••'
+                                 : (valueProvider() || ' ');
+        txt.appendChild(lbl);
+        txt.appendChild(vEl);
+        var glyph = document.createElement('span');
+        glyph.className = 'copy-glyph';
+        glyph.setAttribute('aria-hidden', 'true');
+        glyph.textContent = '⧉︎';
+        row.appendChild(txt);
+        row.appendChild(glyph);
+        row.onclick = function() {
+            row.classList.remove('copy-flash'); void row.offsetWidth; row.classList.add('copy-flash');
+            _copyValue(valueProvider(), copyMsg);
+        };
+        return row;
+    }
+
+    // Custom fields.
+    if (exRow && exBox) {
+        if (extra.length) {
+            extra.forEach(function(fld) {
+                exBox.appendChild(copyRow(
+                    fld.label || '(field)',
+                    function() { return fld.value || ''; },
+                    !!fld.secret,
+                    (fld.label || 'Field') + ' copied'));
+            });
+            exRow.style.display = '';
+        } else {
+            exRow.style.display = 'none';
+        }
+    }
+
+    // Password history (collapsed by default).
+    if (hiRow && hiBox) {
+        if (history.length) {
+            history.forEach(function(h) {
+                hiBox.appendChild(copyRow(
+                    h.t ? _fmtDate(h.t) : 'previous',
+                    function() { return h.p || ''; },
+                    true,
+                    'Old password copied'));
+            });
+            if (hiToggle) hiToggle.textContent = '⏱︎ Password history (' + history.length + ')';
+            hiRow.style.display = '';
+            hiBox.style.display = 'none';   // start collapsed
+        } else {
+            hiRow.style.display = 'none';
+        }
+    }
+    resizeFreezePane();
+}
+function _toggleHistory() {
+    var box = document.getElementById('dechistory');
+    if (!box) return;
+    box.style.display = (box.style.display === 'none') ? '' : 'none';
+    resizeFreezePane();
+}
+
+// ── Decode-panel render of a stored passkey (WebAuthn credential) ───────────
+// The PWA only *displays* that a passkey is stored and offers to delete it —
+// passkeys are created and used (signed) exclusively by the browser extensions
+// (the PWA cannot intercept navigator.credentials on relying-party sites). The
+// passkey object lives inside the encrypted payload JSON as fields.passkey.
+function _renderDecPasskey() {
+    var row = document.getElementById('decpasskey-row');
+    var val = document.getElementById('decpasskey');
+    if (!row || !val) return;
+    var pk = _decodedFields && _decodedFields.passkey;
+    if (pk && pk.rpId) {
+        var bits = [pk.rpId];
+        var when = pk.createdAt
+            ? new Date(pk.createdAt)
+            : (typeof pk.created === 'number' ? new Date(pk.created * 1000) : null);
+        if (when && !isNaN(when.getTime())) bits.push('created ' + when.toLocaleDateString());
+        val.textContent = bits.join(' · ');
+        row.style.display = '';
+    } else {
+        val.textContent = '';
+        row.style.display = 'none';
+    }
+    resizeFreezePane();
+}
+
+// Delete a stored passkey: strip the passkey sub-object and re-save the entry so
+// any username/password on it survives. If the entry holds nothing else, offer
+// to delete the whole record instead.
+function deletePasskey() {
+    var f = _decodedFields;
+    if (!f || !f.passkey) { return; }
+    var rpId = f.passkey.rpId || 'this site';
+
+    // Does the entry carry anything besides the passkey itself?
+    var hasOther = !!(
+        (f.username && f.username.trim()) ||
+        (f.password && f.password.trim()) ||
+        (f.token && f.token.trim()) ||
+        (f.notes && f.notes.trim()) ||
+        (f.tags && f.tags.trim()) ||
+        (Array.isArray(f.extra) && f.extra.length)
+    );
+
+    if (!hasOther) {
+        if (!confirm('This entry only holds a passkey for ' + rpId + '. Delete the whole entry?')) return;
+        deleteEntry();
+        return;
+    }
+
+    if (!confirm('Remove the passkey for ' + rpId + ' from "' + (deleteEntryName || f.name) + '"?\n\nThe username and password on this entry are kept.')) return;
+
+    // Re-save through the normal edit path (atomic delete_rec + data replace),
+    // carrying every other field forward but dropping the passkey.
+    f.passkey = null;
+    editEntry();          // loads the form from _decodedFields (passkey now null)
+    saveEntry();          // commits the edit; saveEntry preserves the (now absent) passkey
+}
+
 function clearDisplay() {
     stopOtpTimer();
     otpKey          = null;
@@ -2666,7 +3385,13 @@ function clearDisplay() {
     document.getElementById('decname').textContent     = ' ';
     document.getElementById('decusername').textContent = ' ';
     document.getElementById('decpassword').textContent = ' ';
+    document.getElementById('decmodified').textContent  = ' ';
+    _setDecTags('');
     setNotes('');
+    _applyDecType('login');
+    _renderDecExtras();
+    _renderDecPasskey();
+    _updateFavBtn();
 }
 
 function _resetKeyFields() {
@@ -2680,8 +3405,9 @@ function clearLines(td) {
     _resetKeyFields();
     _mkCache.clear();
     _terminateArgonPool();
+    resetInactivityTimer();
     clearDisplay();
-    _editRecord = null;
+    _editRecord = null; _editSnapshot = null;
     document.getElementById('newentry').style.display         = 'none';
     document.getElementById('passwordSettings').style.display = 'none';
     document.getElementById('newentry-title').textContent     = 'New Entry';
@@ -2696,16 +3422,51 @@ function renderDecodedFields() {
     if (/^https?:\/\//i.test(f.url)) {
         var a = document.createElement('a');
         a.href = f.url; a.target = '_blank'; a.rel = 'noopener noreferrer';
+        a.title = f.url;
         a.textContent = f.name;
         nameEl.textContent = '';
         nameEl.appendChild(a);
     } else {
         nameEl.textContent = f.name;
     }
+    _setDecModified();
+    _applyDecType(f.type === 'note' ? 'note' : 'login');
     document.getElementById('decusername').textContent = f.username;
     document.getElementById('decpassword').textContent = f.password;
+    _setDecTags(f.tags);
     setNotes(f.notes);
+    _renderDecExtras();
+    _renderDecPasskey();
+    _updateFavBtn();
     if (f.token && !timerVar) { otpKey = f.token; startOtpTimer(); }
+}
+
+// ── Entry type: login vs secure note ───────────────────────────────────────
+// 'login' (default) carries URL / username / password / 2FA; 'note' is a secure
+// note — just a title plus an encrypted body (Notes), tags, and custom fields.
+// The type lives inside the encrypted payload JSON as fields.type, so the v6
+// record format is unchanged and 'login' is the absent-key default (legacy
+// entries need no migration). _applyEntryType() reshapes the entry FORM; the
+// decode panel is reshaped by _applyDecType().
+var _entryType = 'login';
+function _applyEntryType(type) {
+    _entryType = (type === 'note') ? 'note' : 'login';
+    var note = _entryType === 'note';
+    var lo = document.getElementById('type-opt-login');
+    var no = document.getElementById('type-opt-note');
+    if (lo) lo.classList.toggle('is-on', !note);
+    if (no) no.classList.toggle('is-on', note);
+    // Hide the credential-only rows (and the generator) for a secure note.
+    ['frow-url', 'frow-username', 'frow-password', 'frow-token'].forEach(function(id) {
+        var el = document.getElementById(id);
+        if (el) el.style.display = note ? 'none' : '';
+    });
+    var gen = document.getElementById('btn-gen-settings');
+    if (gen) gen.style.display = note ? 'none' : '';
+    if (note) {
+        var ps = document.getElementById('passwordSettings');
+        if (ps) ps.style.display = 'none';
+    }
 }
 
 function cancelEntry() {
@@ -2715,6 +3476,8 @@ function cancelEntry() {
     document.getElementById('username').value = '';
     document.getElementById('password').value = '';
     document.getElementById('token').value    = '';
+    document.getElementById('tags').value     = '';
+    _populateExtraFields([]);
     updatePWStrength();
     var notesEl = document.getElementById('notes');
     notesEl.value = '';
@@ -2722,7 +3485,7 @@ function cancelEntry() {
     document.getElementById('newentry').style.display         = 'none';
     document.getElementById('passwordSettings').style.display = 'none';
     document.getElementById('newentry-title').textContent     = 'New Entry';
-    _editRecord = null;
+    _editRecord = null; _editSnapshot = null;
     if (wasEditing) renderDecodedFields();
     window.scrollTo({ top: 0, behavior: 'smooth' });
 }
@@ -2736,7 +3499,9 @@ function _syncScanBtnWidth() {
 
 function newEntry(td) {
     blinkTD(td);
-    _editRecord = null;
+    _editRecord = null; _editSnapshot = null;
+    _applyEntryType('login');
+    _populateExtraFields([]);
     document.getElementById('newentry-title').textContent = 'New Entry';
     const el = document.getElementById('newentry');
     el.style.display = 'block';
@@ -2751,6 +3516,17 @@ function newEntry(td) {
 function editEntry() {
     if (!_decodedFields) { alert('Decrypt an entry first'); return; }
     _editRecord = deleteEntryRecord;
+    _applyEntryType(_decodedFields.type === 'note' ? 'note' : 'login');
+    _editSnapshot = {
+        password:   _decodedFields.password || '',
+        history:    Array.isArray(_decodedFields.history) ? _decodedFields.history : [],
+        pwModified: typeof _decodedFields.pwModified === 'number' ? _decodedFields.pwModified : null,
+        created:    typeof _decodedFields.created === 'number' ? _decodedFields.created : null,
+        // Carry a stored passkey through PWA edits — the PWA never creates or signs
+        // passkeys, but it must not silently drop one when the user edits the entry.
+        passkey:    (_decodedFields.passkey && typeof _decodedFields.passkey === 'object')
+                        ? _decodedFields.passkey : null
+    };
 
     document.getElementById('name').value     = _decodedFields.name;
     document.getElementById('url').value      = _decodedFields.url;
@@ -2758,6 +3534,8 @@ function editEntry() {
     document.getElementById('password').value = _decodedFields.password;
     updatePWStrength();
     document.getElementById('token').value    = _decodedFields.token;
+    document.getElementById('tags').value     = _decodedFields.tags;
+    _populateExtraFields(_decodedFields.extra);
     var notesEl = document.getElementById('notes');
     notesEl.value = _decodedFields.notes;
     notesEl.style.height = 'auto';
@@ -2830,13 +3608,12 @@ function _rebuildEntryGrid(entries) {
         var btn = document.createElement('button');
         btn.className   = 'entry-btn';
         btn.dataset.row = row;
-        btn.onclick = function() { if (btn === _selectedBtn) { clearDisplay(); } else { decodeLine(btn, row); } };
+        btn.onclick = function() { _onEntryClick(btn, row); };
         if (parts[1] === 'v6') {
             var rowKey = parts.slice(0, -1).join('|');
             var cached = _v5Names.get(rowKey);
             if (cached !== undefined) {
-                btn.textContent = cached;
-                btn.title       = cached;
+                _setEntryName(btn, cached);
             } else {
                 btn.classList.add('v5-locked');
                 btn.style.display = 'none';
@@ -2858,6 +3635,12 @@ function updateEntryCount() {
     var el = document.getElementById('entry-count');
     if (!el) return;
     el.textContent = 'Displaying ' + visible + ' of ' + total + (total === 1 ? ' entry' : ' entries');
+    // The Group A–Z toggle and the multi-select control are only meaningful once
+    // entries are unlocked/revealed; keep them hidden while everything is a 🔒.
+    var gt = document.getElementById('group-toggle-lbl');
+    if (gt) gt.style.display = visible > 0 ? '' : 'none';
+    var st = document.getElementById('select-toggle');
+    if (st) st.style.display = visible > 0 ? '' : 'none';
 }
 
 function _initEntries() {
@@ -2869,7 +3652,7 @@ function _initEntries() {
             // 'unsafe-inline' script); wire the click here from data-row, the
             // same way _rebuildEntryGrid does for dynamically-added buttons.
             var row = btn.dataset.row;
-            btn.onclick = function() { if (btn === _selectedBtn) { clearDisplay(); } else { decodeLine(btn, row); } };
+            btn.onclick = function() { _onEntryClick(btn, row); };
         }
     });
     updateEntryCount();
@@ -2939,8 +3722,7 @@ async function decodeLine(passedTD, encryptedData) {
 
             // Cache name, reveal the clicked button, and re-sort to alphabetical order.
             _v5Names.set(rowKey, name);
-            passedTD.textContent = name;
-            passedTD.title       = name;
+            _setEntryName(passedTD, name);
             passedTD.classList.remove('v5-locked');
             passedTD.style.display = '';
             _sortEntryGrid();
@@ -2953,6 +3735,7 @@ async function decodeLine(passedTD, encryptedData) {
             if (/^https?:\/\//i.test(url)) {
                 var a = document.createElement('a');
                 a.href = url; a.target = '_blank'; a.rel = 'noopener noreferrer';
+                a.title = url;
                 a.textContent = name;
                 nameEl.textContent = '';
                 nameEl.appendChild(a);
@@ -2962,19 +3745,39 @@ async function decodeLine(passedTD, encryptedData) {
 
             document.getElementById('decusername').textContent = (fields.username || '').trim();
             document.getElementById('decpassword').textContent = (fields.password || '').trim();
+            var tags = (fields.tags || '').trim();
+            _setDecTags(tags);
             setNotes((fields.notes || '').trim());
 
             var token = (fields.token || '').trim();
             if (token) { otpKey = token; startOtpTimer(); }
 
+            // Seed the @-search index now that this record's payload is decrypted.
+            _searchText.set(rowKey, _searchIndex(fields));
+
+            var entryType = (fields.type === 'note') ? 'note' : 'login';
             _decodedFields = {
-                name:     name,
-                url:      url,
-                username: (fields.username || '').trim(),
-                password: (fields.password || '').trim(),
-                token:    token,
-                notes:    (fields.notes    || '').trim()
+                name:       name,
+                type:       entryType,
+                url:        url,
+                username:   (fields.username || '').trim(),
+                password:   (fields.password || '').trim(),
+                token:      token,
+                tags:       tags,
+                notes:      (fields.notes    || '').trim(),
+                extra:      Array.isArray(fields.extra)   ? fields.extra   : [],
+                history:    Array.isArray(fields.history) ? fields.history : [],
+                pwModified: typeof fields.pwModified === 'number' ? fields.pwModified : null,
+                created:    typeof fields.created === 'number' ? fields.created : null,
+                passkey:    (fields.passkey && typeof fields.passkey === 'object') ? fields.passkey : null
             };
+            _applyDecType(entryType);
+            _markNoteButton(passedTD, entryType === 'note');
+            _setDecModified();
+            _renderDecExtras();
+            _renderDecPasskey();
+            _updateFavBtn();
+            _markFavButtons();
 
         } catch (_) {
             document.getElementById('decname').textContent = 'Wrong key or corrupted entry';
@@ -2998,12 +3801,14 @@ function _relockV5Entries() {
     // the progress bar / worker count don't linger past a key-field edit.
     _revealGen++;
     _revealActive  = false;
+    if (_selectMode) _exitSelectMode();
     var _rp = document.getElementById('reveal-progress');
     if (_rp) _rp.style.display = 'none';
     _hideWorkerCount();
     _lastRevealPw  = null;
     _lastRevealPw2 = null;
     _v5Names.clear();
+    _searchText.clear();
     _clearVaultTools();
     _setIntegrityBadge(null);
     document.querySelectorAll('.entry-grid .entry-btn').forEach(function(btn) {
@@ -3014,6 +3819,10 @@ function _relockV5Entries() {
             btn.title = '';
         }
     });
+    // Re-sort so the group headers are dropped: every button is now hidden, so
+    // _sortEntryGrid() removes the previous-run .entry-group-hdr rows and adds
+    // none back (otherwise stale A–Z headers linger over an empty grid on lock).
+    _sortEntryGrid();
     updateEntryCount();
     _updateVaultKeyBar();
 }
@@ -3024,8 +3833,7 @@ function _revealCachedV5Buttons() {
         var rowKey = btn.dataset.row.split('|').slice(0, -1).join('|');
         var cached = _v5Names.get(rowKey);
         if (cached !== undefined) {
-            btn.textContent = cached;
-            btn.title       = cached;
+            _setEntryName(btn, cached);
             btn.classList.remove('v5-locked');
             btn.style.display = '';
         }
@@ -3041,18 +3849,132 @@ function _revealCachedV5Buttons() {
     }
 }
 
-// Sort entry grid alphabetically by button text; hidden (locked) buttons go last.
+// ---- Entry monogram avatars ("favicons") ---------------------------------
+// CSP-safe, no network: a colored circle with the name's first letter. The
+// color is a stable FNV-1a hash of the name → hue, so the same entry always
+// gets the same avatar. (A third-party favicon service would violate
+// connect-src 'self' and leak which sites are in the vault.)
+function _avatarLetter(name) {
+    var c = (name || '').trim().charAt(0);
+    return c ? c.toUpperCase() : '#';
+}
+function _avatarColor(name) {
+    var h = 0x811c9dc5 >>> 0;
+    var s = name || '';
+    for (var i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = (h * 0x01000193) >>> 0; }
+    return 'hsl(' + (h % 360) + ',42%,45%)';
+}
+// Set a revealed entry button's label with a leading monogram avatar. The plain
+// name is stored on dataset.name so sort/group never read the avatar glyph.
+function _setEntryName(btn, name) {
+    btn.dataset.name = name;
+    btn.title = name;
+    btn.textContent = '';
+    var av = document.createElement('span');
+    av.className = 'entry-avatar';
+    av.textContent = _avatarLetter(name);
+    av.style.background = _avatarColor(name);
+    av.setAttribute('aria-hidden', 'true');
+    var lbl = document.createElement('span');
+    lbl.className = 'entry-lbl';
+    lbl.textContent = name;
+    btn.appendChild(av);
+    btn.appendChild(lbl);
+}
+// Mark/unmark an entry button as holding a passkey (a 🔐 badge via the
+// .entry-passkey class). Idempotent; safe to call on every reveal.
+function _markPasskeyButton(btn, isPasskey) {
+    if (!btn) return;
+    if (isPasskey) { btn.classList.add('entry-passkey'); btn.dataset.passkey = '1'; }
+    else           { btn.classList.remove('entry-passkey'); delete btn.dataset.passkey; }
+}
+// Mark/unmark an entry button as a secure note (a 📝 badge via .entry-note).
+// Idempotent; safe to call on every reveal (mirrors _markPasskeyButton).
+function _markNoteButton(btn, isNote) {
+    if (!btn) return;
+    if (isNote) { btn.classList.add('entry-note'); btn.dataset.note = '1'; }
+    else        { btn.classList.remove('entry-note'); delete btn.dataset.note; }
+}
+// Reshape the decode panel for the decoded entry's type: a secure note hides the
+// Username/2FA and Password/Modified rows (it has neither). Called on every decode
+// and from clearDisplay (which resets to the login layout).
+function _applyDecType(type) {
+    var note = type === 'note';
+    var u = document.getElementById('decrow-user');
+    var p = document.getElementById('decrow-pw');
+    if (u) u.style.display = note ? 'none' : '';
+    if (p) p.style.display = note ? 'none' : '';
+    resizeFreezePane();
+}
+// Plain name of an entry button for sorting/grouping (avatar-aware).
+function _btnName(btn) {
+    return btn.dataset.name !== undefined ? btn.dataset.name : btn.textContent;
+}
+
+// First-letter group key for a revealed entry name: uppercased first char,
+// bucketing digits / symbols / non-Latin under '#'.
+function _entryGroupKey(name) {
+    var c = (name || '').trim().charAt(0).toUpperCase();
+    return (c >= 'A' && c <= 'Z') ? c : '#';
+}
+
+// Sort entry grid alphabetically by button text; hidden (locked) buttons go
+// last. Revealed buttons are grouped under a sticky first-letter header
+// (A, B, C…, '#' for non-letters); hidden 🔒 buttons get no header since they
+// have no plaintext name yet.
 function _sortEntryGrid() {
     var grid = document.querySelector('.entry-grid');
     if (!grid) return;
-    var btns = Array.from(grid.children);
+    // Drop any headers from a previous run; re-collect only the buttons.
+    grid.querySelectorAll('.entry-group-hdr').forEach(function(h) { h.remove(); });
+    _markFavButtons();
+    var btns = Array.from(grid.querySelectorAll('.entry-btn'));
     btns.sort(function(a, b) {
         var aHidden = a.style.display === 'none';
         var bHidden = b.style.display === 'none';
         if (aHidden !== bHidden) return aHidden ? 1 : -1;
-        return a.textContent.toLowerCase().localeCompare(b.textContent.toLowerCase());
+        // Favorites pin to the top, then alphabetical within each group.
+        var aFav = a.classList.contains('entry-fav');
+        var bFav = b.classList.contains('entry-fav');
+        if (aFav !== bFav) return aFav ? -1 : 1;
+        return _btnName(a).toLowerCase().localeCompare(_btnName(b).toLowerCase());
     });
-    btns.forEach(function(btn) { grid.appendChild(btn); });
+    var curKey = null;
+    btns.forEach(function(btn) {
+        if (_groupEntries && btn.style.display !== 'none') {
+            var key = btn.classList.contains('entry-fav') ? '★ Favorites'
+                                                          : _entryGroupKey(_btnName(btn));
+            if (key !== curKey) {
+                curKey = key;
+                var h = document.createElement('div');
+                h.className = 'entry-group-hdr';
+                h.textContent = key;
+                h.setAttribute('aria-hidden', 'true');
+                grid.appendChild(h);
+            }
+        }
+        grid.appendChild(btn);
+    });
+}
+
+// Drive `count` items through a fixed pool of at most _revealConcurrency()
+// workers, each pulling the next index from a shared counter and awaiting
+// itemFn(i). If itemFn resolves to exactly false the whole pool stops — this
+// expresses the abort-on-supersede (reveal-all) and all-or-nothing-on-failure
+// (_forEachRecordDecrypt) semantics in one place. Caps peak Argon2id memory at
+// pool-size × the active KDF cost (the worker pool itself is the real bound).
+async function _runPool(count, itemFn) {
+    var nextIdx = 0, stopped = false;
+    async function worker() {
+        while (nextIdx < count && !stopped) {
+            var i = nextIdx++;
+            if ((await itemFn(i)) === false) { stopped = true; return; }
+        }
+    }
+    var pool = [];
+    var conc = _revealConcurrency();
+    for (var w = 0; w < conc && w < count; w++) pool.push(worker());
+    await Promise.all(pool);
 }
 
 // Decrypt and reveal all hidden v5 entry names using both passwords.
@@ -3074,8 +3996,6 @@ async function _revealAllV5Names(pw, pw2) {
     _showWorkerCount();
 
     var done       = 0;
-    var nextIdx    = 0;
-    var aborted    = false;
     var revealedOk = 0;   // names actually decrypted/shown — 0 means wrong keys
 
     // Reveal one button: reuse a cached name or derive it. Returns false if the
@@ -3085,7 +4005,7 @@ async function _revealAllV5Names(pw, pw2) {
         var rowKey = parts.slice(0, -1).join('|');
         if (_v5Names.has(rowKey)) {
             var n = _v5Names.get(rowKey);
-            btn.textContent = n; btn.title = n;
+            _setEntryName(btn, n);
             btn.classList.remove('v5-locked'); btn.style.display = '';
             revealedOk++;
         } else {
@@ -3093,7 +4013,7 @@ async function _revealAllV5Names(pw, pw2) {
                 var name = await decryptName(pw, pw2, parts[2], parts[3], parts[4], parts[5], parts[0]);
                 if (gen !== _revealGen) return false;
                 _v5Names.set(rowKey, name);
-                btn.textContent = name; btn.title = name;
+                _setEntryName(btn, name);
                 btn.classList.remove('v5-locked'); btn.style.display = '';
                 revealedOk++;
             } catch (_) {
@@ -3103,25 +4023,31 @@ async function _revealAllV5Names(pw, pw2) {
                 /* wrong key — leave hidden */
             }
         }
+        // Populate the @-search index (tags + notes) while this record's keys are
+        // hot in _mkCache — adds only HKDF + symmetric layers, no extra Argon2id.
+        if (!_searchText.has(rowKey)) {
+            try {
+                var f = await decryptFields(pw, pw2, parts[2], parts[3], parts[6], parts[7], parts[8], parts[9], parts[10]);
+                if (gen !== _revealGen) return false;
+                _searchText.set(rowKey, _searchIndex(f));
+                // Flag passkey / secure-note entries in the grid (payload already
+                // decrypted here, so the badge costs no extra Argon2id).
+                _markPasskeyButton(btn, !!(f.passkey && f.passkey.rpId));
+                _markNoteButton(btn, f.type === 'note');
+            } catch (_) {
+                if (gen !== _revealGen) return false;
+                /* wrong key / corrupt — leave unindexed */
+            }
+        }
         done++;
         if (fill) fill.style.width = Math.round((done / total) * 100) + '%';
         updateEntryCount();
         return true;
     }
 
-    // Fixed pool of workers pulling from a shared index, so at most
-    // _REVEAL_CONCURRENCY name decryptions are in flight at once.
-    async function worker() {
-        while (nextIdx < locked.length && !aborted) {
-            var btn = locked[nextIdx++];
-            if (!(await reveal(btn))) { aborted = true; return; }
-        }
-    }
-
-    var pool = [];
-    var conc = _revealConcurrency();
-    for (var w = 0; w < conc && w < locked.length; w++) pool.push(worker());
-    await Promise.all(pool);
+    // Fixed pool pulling from a shared index (reveal returns false to abort a
+    // superseded run), so at most _revealConcurrency() decryptions run at once.
+    await _runPool(locked.length, function(i) { return reveal(locked[i]); });
 
     _revealActive = false;
     if (bar) bar.style.display = 'none';
@@ -3134,6 +4060,12 @@ async function _revealAllV5Names(pw, pw2) {
     // blur can skip the whole pass.
     _lastRevealPw  = pw;
     _lastRevealPw2 = pw2;
+    // Names just decoded and the grid re-sorted into alphabetical order — snap
+    // back to the top so the user sees the start of the list, not wherever the
+    // pre-reveal 🔒 placeholders happened to leave the scroll. Only when at least
+    // one name actually decoded (a wrong-password pass reveals nothing and should
+    // leave the view untouched).
+    if (revealedOk > 0) window.scrollTo({ top: 0, behavior: 'smooth' });
     // Keys are confirmed good (at least one name decrypted) — check the vault
     // signature against what this page is showing. Wrong-password runs reveal
     // nothing and must not raise a false integrity alarm.
@@ -3144,63 +4076,139 @@ async function _revealAllV5Names(pw, pw2) {
 // Save (encrypt) a new entry
 // ============================================================
 
-async function saveEntry() {
+// Read + validate the entry form's required key/name fields. Returns
+// { password, password2, name } or null (after alerting) if anything is missing.
+function _validateEntryForm() {
     var password = document.getElementById('aeskey').value;
-    if (!password) { alert('Enter primary password first'); return; }
-
+    if (!password) { alert('Enter primary password first'); return null; }
     var name = document.getElementById('name').value.trim();
-    if (!name) { alert('Name is required'); return; }
-    if (name.indexOf('|') !== -1) { alert('Name may not contain "|"'); return; }
+    if (!name) { alert('Name is required'); return null; }
+    if (name.indexOf('|') !== -1) { alert('Name may not contain "|"'); return null; }
+    var password2 = document.getElementById('aeskey2').value;
+    if (!password2) { alert('Enter secondary password first'); return null; }
+    return { password: password, password2: password2, name: name };
+}
+
+// Build the encrypted-payload JSON object from the form, including the password
+// history / age / created stamps. All of this lives inside the encrypted payload,
+// so the v6 record format is unchanged. _editSnapshot holds the pre-edit values.
+function _buildEntryFields() {
+    var isNote  = _entryType === 'note';
+    var editing = _editRecord !== null && _editSnapshot;
+    var nowSec  = Math.floor(Date.now() / 1000);
+    var prevMod = editing ? _editSnapshot.pwModified : null;
+
+    // Password history + age: on edit, if the password changed, archive the old
+    // one (newest first, capped) and stamp pwModified. New entries stamp the
+    // creation time. A secure note has no password, so it skips this entirely.
+    var pwVal, history, pwModified;
+    if (isNote) {
+        pwVal      = '';
+        history    = [];
+        pwModified = (editing && typeof prevMod === 'number') ? prevMod : nowSec;
+    } else {
+        pwVal   = document.getElementById('password').value;
+        var prevPw = editing ? _editSnapshot.password : '';
+        history = (editing && Array.isArray(_editSnapshot.history))
+                      ? _editSnapshot.history.slice() : [];
+        pwModified = prevMod;
+        if (!editing) {
+            pwModified = nowSec;                        // new entry
+        } else if (pwVal !== prevPw) {
+            if (prevPw) history.unshift({ p: prevPw, t: prevMod || null });
+            if (history.length > HISTORY_MAX) history = history.slice(0, HISTORY_MAX);
+            pwModified = nowSec;                         // password rotated
+        }
+        // A legacy entry being edited may carry no last-modified stamp at all; if
+        // so, backfill it with the post time so the date is no longer empty.
+        if (editing && typeof pwModified !== 'number') pwModified = nowSec;
+    }
+    // Creation time: stamped once on create and carried unchanged through edits.
+    // A legacy entry being edited for the first time has no `created`; fall back
+    // to its pwModified (the create stamp unless the password was ever rotated),
+    // else to now, so it gains the stamp from here on.
+    var created = editing
+        ? (typeof _editSnapshot.created === 'number' ? _editSnapshot.created
+           : (typeof prevMod === 'number' ? prevMod : nowSec))
+        : nowSec;
 
     var fields = {
-        url:      document.getElementById('url').value,
-        username: document.getElementById('username').value,
-        password: document.getElementById('password').value,
-        token:    document.getElementById('token').value,
-        notes:    document.getElementById('notes').value
+        url:        isNote ? '' : document.getElementById('url').value,
+        username:   isNote ? '' : document.getElementById('username').value,
+        password:   pwVal,
+        token:      isNote ? '' : document.getElementById('token').value,
+        notes:      document.getElementById('notes').value,
+        tags:       _normalizeTags(document.getElementById('tags').value),
+        extra:      _collectExtraFields(),
+        history:    history,
+        pwModified: pwModified,
+        created:    created
     };
+    // 'login' is the absent-key default — only stamp the type for a secure note,
+    // so existing login records stay byte-for-byte the same on re-save.
+    if (isNote) fields.type = 'note';
+    // Preserve a stored passkey across edits (the PWA never edits passkeys, but it
+    // must round-trip one that the extension created). Only kept when editing —
+    // a brand-new entry has no passkey. _editSnapshot.passkey is set to null by
+    // deletePasskey() so a passkey removal is committed by simply omitting it.
+    if (editing && _editSnapshot.passkey && typeof _editSnapshot.passkey === 'object') {
+        fields.passkey = _editSnapshot.passkey;
+    }
+    return fields;
+}
 
-    var password2 = document.getElementById('aeskey2').value;
-    if (!password2) { alert('Enter secondary password first'); return; }
+// Encrypt the name + payload into a fresh v6 record. Two record salts, shared by
+// name + payload — each yields one Argon2id master key (pw1→recSalt1, pw2→
+// recSalt2), so the whole record costs just two memory-hard derivations (cached
+// and reused across name/payload).
+async function _buildEntryRecord(password, password2, name, fields) {
+    var recSalt1 = crypto.getRandomValues(new Uint8Array(32));
+    var recSalt2 = crypto.getRandomValues(new Uint8Array(32));
+    var nameEnc = await encryptName(password, password2, recSalt1, recSalt2, name);
+    var result  = await encryptFields(password, password2, recSalt1, recSalt2, fields);
+    return _assembleRecord(nameEnc, result, recSalt1, recSalt2);
+}
+
+// POST the new record. Edit = atomic replace: tell the server which record (by
+// content) to remove alongside the insert. See deleteEntryRecord for why content,
+// not line index. Returns the server response text.
+function _postEntry(record) {
+    var params = 'data=' + encodeURIComponent(record);
+    if (_editRecord !== null) {
+        params = 'delete_rec=' + encodeURIComponent(_editRecord) + '&' + params;
+    }
+    return _xhrPost(params);
+}
+
+// Reset the entry form back to its empty "New Entry" state after a successful save.
+function _resetEntryForm() {
+    clearDisplay();
+    ['name', 'url', 'username', 'password', 'token', 'notes', 'tags'].forEach(function(id) {
+        document.getElementById(id).value = '';
+    });
+    _populateExtraFields([]);
+    document.getElementById('newentry-title').textContent     = 'New Entry';
+    document.getElementById('newentry').style.display         = 'none';
+    document.getElementById('passwordSettings').style.display = 'none';
+}
+
+async function saveEntry() {
+    var v = _validateEntryForm();
+    if (!v) return;
+    var fields = _buildEntryFields();
     try {
-        // Two record salts, shared by name + payload — each yields one Argon2id
-        // master key (pw1→recSalt1, pw2→recSalt2), so the whole record costs just
-        // two memory-hard derivations (cached and reused across name/payload).
-        var recSalt1 = crypto.getRandomValues(new Uint8Array(32));
-        var recSalt2 = crypto.getRandomValues(new Uint8Array(32));
-        var nameEnc = await encryptName(password, password2, recSalt1, recSalt2, name);
-        var result  = await encryptFields(password, password2, recSalt1, recSalt2, fields);
-        var record  = [nameEnc.encNameHex, 'v6',
-                       bytesToHex(recSalt1),   bytesToHex(recSalt2),
-                       nameEnc.nameNonce1Hex,  nameEnc.nameNonce2Hex,
-                       result.iv1Hex,          result.nonce2Hex,
-                       result.nonce3Hex,       result.nonce4Hex,
-                       result.encHex].join('|');
-        // Cache name so _rebuildEntryGrid can reveal the button immediately.
-        _v5Names.set(record, name);
-        // Edit = atomic replace: tell the server which record (by content) to
-        // remove alongside the insert. See deleteEntryRecord for why content,
-        // not line index.
-        var params = 'data=' + encodeURIComponent(record);
-        if (_editRecord !== null) {
-            params = 'delete_rec=' + encodeURIComponent(_editRecord) + '&' + params;
-        }
-        var responseText = await _xhrPost(params);
-        _editRecord = null;
+        var record = await _buildEntryRecord(v.password, v.password2, v.name, fields);
+        // Cache name so _rebuildEntryGrid can reveal the button immediately, and
+        // seed the @-search index (the record is already decrypted here).
+        _v5Names.set(record, v.name);
+        _searchText.set(record, _searchIndex(fields));
+        var responseText = await _postEntry(record);
+        _editRecord = null; _editSnapshot = null;
         try {
             if (_applyServerResponse(responseText)) _revealCachedV5Buttons();
         } catch (_) { location.reload(); return; }
         _signAfterWrite();
-        clearDisplay();
-        document.getElementById('name').value     = '';
-        document.getElementById('url').value      = '';
-        document.getElementById('username').value = '';
-        document.getElementById('password').value = '';
-        document.getElementById('token').value    = '';
-        document.getElementById('notes').value    = '';
-        document.getElementById('newentry-title').textContent     = 'New Entry';
-        document.getElementById('newentry').style.display         = 'none';
-        document.getElementById('passwordSettings').style.display = 'none';
+        _resetEntryForm();
     } catch (e) {
         if (e.stale) {
             showToast('Entry was changed elsewhere — reloading');
@@ -3382,6 +4390,574 @@ async function _importVaultFile(file) {
     }
 }
 
+// ============================================================
+// Plaintext CSV export / import — interoperability with other
+// password managers. UNLIKE the .lines path these handle CLEARTEXT:
+// export writes every secret in the clear (hard-gated behind a warning
+// + confirm), and import re-encrypts each CSV row into a fresh v6
+// record and MERGES it into the vault (the .lines import replaces the
+// whole vault; CSV adds to it — the usual "migrate in" shape).
+// ============================================================
+
+// RFC 4180 CSV parser → array of string-array rows. Handles quoted
+// fields, embedded commas/newlines, "" escapes, a leading BOM, and
+// CR / CRLF / LF line endings.
+function _csvParse(text) {
+    var rows = [], row = [], field = '', inQ = false;
+    var i = 0, n = text.length;
+    if (text.charCodeAt(0) === 0xFEFF) i = 1;                 // strip BOM
+    function endRow() { row.push(field); field = ''; rows.push(row); row = []; }
+    while (i < n) {
+        var c = text[i];
+        if (inQ) {
+            if (c === '"') {
+                if (text[i + 1] === '"') { field += '"'; i += 2; continue; }
+                inQ = false; i++; continue;
+            }
+            field += c; i++; continue;
+        }
+        if (c === '"')  { inQ = true; i++; continue; }
+        if (c === ',')  { row.push(field); field = ''; i++; continue; }
+        if (c === '\r') { endRow(); if (text[i + 1] === '\n') i++; i++; continue; }
+        if (c === '\n') { endRow(); i++; continue; }
+        field += c; i++;
+    }
+    if (field !== '' || row.length) endRow();
+    return rows;
+}
+
+// Quote one CSV field (always-quote — valid and simplest; doubles ").
+function _csvField(v) {
+    return '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"';
+}
+
+// Export columns. `extra` carries the custom-fields array as JSON so our own
+// CSV round-trips; other managers simply ignore the column.
+var _CSV_COLS = ['name', 'url', 'username', 'password', 'totp', 'notes', 'tags', 'extra'];
+
+// Download every entry as a PLAINTEXT CSV. Gated behind _isVaultUnlocked()
+// (so the passwords are known-correct) and a hard warning + confirm, because
+// the output has none of the vault's protection.
+async function exportVaultCSV() {
+    if (!_isVaultUnlocked()) {
+        showToast('Enter both passwords and unlock the vault first.');
+        return;
+    }
+    if (!_allEntries.length) { showToast('Nothing to export'); return; }
+
+    if (!window.confirm(
+            '⚠︎  Export UNENCRYPTED CSV?\n\n'
+          + 'This writes every entry — passwords, TOTP secrets, and notes — to '
+          + 'a plain-text file with NO encryption and NONE of this vault’s '
+          + 'protection. Anyone who can read the file sees everything.\n\n'
+          + 'Only do this to migrate into another password manager, then DELETE '
+          + 'the file immediately afterwards.\n\n'
+          + 'Continue and export all secrets in clear text?')) {
+        return;
+    }
+
+    var pw  = document.getElementById('aeskey').value;
+    var pw2 = document.getElementById('aeskey2').value;
+    var out = document.getElementById('import-status');
+    function say(msg) { if (out) { out.style.display = ''; out.textContent = msg; } }
+
+    say('Decrypting all entries… 0 / ' + _allEntries.length);
+    var rows;
+    try {
+        rows = await _forEachRecordDecrypt(pw, pw2, function(rec, name, fields) {
+            return {
+                name:     name,
+                url:      fields.url || '',
+                username: fields.username || '',
+                password: fields.password || '',
+                totp:     fields.token || '',
+                notes:    fields.notes || '',
+                tags:     fields.tags || '',
+                extra:    (Array.isArray(fields.extra) && fields.extra.length)
+                              ? JSON.stringify(fields.extra) : ''
+            };
+        }, function(done, total) { say('Decrypting all entries… ' + done + ' / ' + total); });
+    } catch (e) {
+        say('CSV export failed — ' + e.message);
+        return;
+    }
+
+    var lines = [_CSV_COLS.join(',')];
+    rows.forEach(function(r) {
+        lines.push(_CSV_COLS.map(function(c) { return _csvField(r[c]); }).join(','));
+    });
+    var content = lines.join('\r\n') + '\r\n';
+
+    var blob = new Blob([content], { type: 'text/csv' });
+    var url  = URL.createObjectURL(blob);
+    var a    = document.createElement('a');
+    var d    = new Date();
+    var pad  = function(x) { return String(x).padStart(2, '0'); };
+    a.href     = url;
+    a.download = 'vault-export-' + d.getFullYear() + '-' + pad(d.getMonth() + 1)
+               + '-' + pad(d.getDate()) + '.csv';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(function() { URL.revokeObjectURL(url); }, 1000);
+    say('');
+    showToast('⚠︎ Exported ' + rows.length + ' entries as UNENCRYPTED CSV — delete the file when done');
+}
+
+// Header-name aliases → our field keys, so common manager exports
+// (Bitwarden's login_*, Chrome's name/url/username/password/note, etc.)
+// map onto our schema without the user renaming columns.
+var _CSV_ALIASES = {
+    name:     ['name', 'title', 'account', 'entry', 'item'],
+    url:      ['url', 'uri', 'website', 'site', 'web site', 'login_uri', 'urls'],
+    username: ['username', 'user', 'login', 'login_username', 'user name', 'email', 'e-mail'],
+    password: ['password', 'pass', 'pwd', 'login_password'],
+    totp:     ['totp', 'otp', 'login_totp', 'token', '2fa', 'otpauth', 'authenticator key'],
+    notes:    ['notes', 'note', 'comment', 'comments'],
+    tags:     ['tags', 'tag', 'labels', 'folder', 'category', 'grouping'],
+    extra:    ['extra', 'custom fields', 'fields']
+};
+
+// Open a file picker for a CSV, then hand it to the importer (transient
+// hidden input — same idiom as scanQRCode / _importVaultClick).
+function _importCsvClick() {
+    if (_importBusy) return;
+    var fileInput = document.createElement('input');
+    fileInput.type   = 'file';
+    fileInput.accept = '.csv,text/csv,text/plain';
+    fileInput.style.cssText = 'position:fixed;top:0;left:0;opacity:0;pointer-events:none';
+    document.body.appendChild(fileInput);
+
+    fileInput.addEventListener('change', function() {
+        var file = fileInput.files[0];
+        if (fileInput.parentNode) document.body.removeChild(fileInput);
+        if (file) _importCsvFile(file);
+    });
+    window.addEventListener('focus', function onFocus() {
+        window.removeEventListener('focus', onFocus);
+        setTimeout(function() {
+            if (fileInput.parentNode) document.body.removeChild(fileInput);
+        }, 500);
+    }, { once: true });
+
+    fileInput.click();
+}
+
+// Parse a CSV file and ADD its rows to the vault (merge, not replace).
+// Gated on _isVaultUnlocked() so the entered passwords are known-correct —
+// otherwise we'd encrypt the new rows under a different key than the rest of
+// the vault. Each row is re-encrypted into a fresh v6 record, then the whole
+// (existing + new) set is committed in one count-flexible `restore` write.
+async function _importCsvFile(file) {
+    var out = document.getElementById('import-status');
+    function say(msg) { if (out) { out.style.display = ''; out.textContent = msg; } }
+
+    var pw  = document.getElementById('aeskey').value;
+    var pw2 = document.getElementById('aeskey2').value;
+    if (!_isVaultUnlocked()) { say('Enter both passwords and unlock the vault first.'); return; }
+
+    var text;
+    try { text = await _readFileText(file); }
+    catch (e) { say('Import failed — ' + e.message); return; }
+
+    var grid = _csvParse(text).filter(function(r) {
+        return r.some(function(c) { return c.trim() !== ''; });   // drop blank lines
+    });
+    if (grid.length < 2) { say('That CSV has no data rows.'); return; }
+
+    var header = grid[0].map(function(h) { return h.trim().toLowerCase(); });
+    var col = {};
+    Object.keys(_CSV_ALIASES).forEach(function(key) {
+        for (var a = 0; a < _CSV_ALIASES[key].length; a++) {
+            var idx = header.indexOf(_CSV_ALIASES[key][a]);
+            if (idx !== -1) { col[key] = idx; break; }
+        }
+    });
+    if (col.name === undefined && col.username === undefined && col.url === undefined) {
+        say('Unrecognized CSV — needs at least a "name", "username", or "url" column.');
+        return;
+    }
+
+    function cell(r, key) {
+        return (col[key] !== undefined && r[col[key]] != null) ? String(r[col[key]]) : '';
+    }
+    var nowSec = Math.floor(Date.now() / 1000);
+    var parsed = [], skipped = 0;
+    for (var i = 1; i < grid.length; i++) {
+        var r = grid[i];
+        var name = (cell(r, 'name').trim() || cell(r, 'username').trim()
+                    || cell(r, 'url').trim()).replace(/\|/g, ' ').trim();
+        if (!name) { skipped++; continue; }
+
+        var extra = [], rawExtra = cell(r, 'extra').trim();
+        if (rawExtra) {
+            try {
+                var ex = JSON.parse(rawExtra);
+                if (Array.isArray(ex)) {
+                    extra = ex.filter(function(f) { return f && (f.label || f.value); })
+                              .map(function(f) {
+                                  return { label: String(f.label || ''),
+                                           value: String(f.value || ''),
+                                           secret: !!f.secret };
+                              });
+                }
+            } catch (_) { /* not our JSON extra column — ignore */ }
+        }
+
+        parsed.push({
+            name: name,
+            fields: {
+                url:        cell(r, 'url'),
+                username:   cell(r, 'username'),
+                password:   cell(r, 'password'),
+                token:      cell(r, 'totp').trim(),
+                notes:      cell(r, 'notes'),
+                tags:       _normalizeTags(cell(r, 'tags')),
+                extra:      extra,
+                history:    [],
+                pwModified: nowSec,
+                created:    nowSec
+            }
+        });
+    }
+    if (!parsed.length) { say('No importable rows found in that CSV.'); return; }
+    return _importParsedEntries(parsed, skipped, 'CSV');
+}
+
+// Shared tail for every "merge these parsed entries into the vault" importer
+// (CSV / KeePass XML / 1Password 1pux). `parsed` is [{name, fields}], already
+// validated; `sourceLabel` names the format for the prompts. Confirms, encrypts
+// each entry into a fresh v6 record under the CURRENT passwords (so the new rows
+// share the vault's key pair), and commits existing+new in one count-flexible
+// `restore` write — identical guarantees to the old CSV path.
+async function _importParsedEntries(parsed, skipped, sourceLabel) {
+    var out = document.getElementById('import-status');
+    function say(msg) { if (out) { out.style.display = ''; out.textContent = msg; } }
+    var pw  = document.getElementById('aeskey').value;
+    var pw2 = document.getElementById('aeskey2').value;
+    if (!_isVaultUnlocked()) { say('Enter both passwords and unlock the vault first.'); return; }
+    if (!parsed.length) { say('No importable entries found in that ' + sourceLabel + '.'); return; }
+
+    var curCount = _allEntries.length;
+    var msg = 'Add ' + parsed.length + ' entr' + (parsed.length === 1 ? 'y' : 'ies')
+            + ' from this ' + sourceLabel + ' to your vault?\n\n'
+            + 'Your ' + curCount + ' existing entr' + (curCount === 1 ? 'y is' : 'ies are')
+            + ' kept — the imported entries are added alongside them and '
+            + 're-encrypted with the passwords in the key fields. A backup of the '
+            + 'current vault is saved on the server first.';
+    if (skipped) msg += '\n\n(' + skipped + ' incomplete entr' + (skipped === 1 ? 'y' : 'ies')
+                      + ' with no name/username/url will be skipped.)';
+    if (!window.confirm(msg)) { say(''); return; }
+
+    _importBusy = true;
+    try {
+        // Encrypt every parsed row into a fresh v6 record, bounded-concurrency so
+        // the Argon2id derivations spread across the worker pool (each row uses two
+        // fresh master keys, so _mkCache can't help — but the pool still parallelises).
+        say('Encrypting… 0 / ' + parsed.length);
+        var records = new Array(parsed.length);
+        var names   = new Array(parsed.length);
+        var nextIdx = 0, done = 0, failed = null;
+        async function enc() {
+            while (nextIdx < parsed.length && failed === null) {
+                var k = nextIdx++;
+                try {
+                    var s1 = crypto.getRandomValues(new Uint8Array(32));
+                    var s2 = crypto.getRandomValues(new Uint8Array(32));
+                    var ne = await encryptName(pw, pw2, s1, s2, parsed[k].name);
+                    var rf = await encryptFields(pw, pw2, s1, s2, parsed[k].fields);
+                    records[k] = _assembleRecord(ne, rf, s1, s2);
+                    names[k] = parsed[k].name;
+                } catch (e) {
+                    if (failed === null) failed = e;
+                    return;
+                }
+                done++;
+                say('Encrypting… ' + done + ' / ' + parsed.length);
+            }
+        }
+        var pool = [], conc = _revealConcurrency();
+        for (var w = 0; w < conc && w < parsed.length; w++) pool.push(enc());
+        await Promise.all(pool);
+        if (failed) { say(sourceLabel + ' import failed — ' + failed.message + '. The vault was not modified.'); return; }
+
+        // Merge: existing canonical records + the new ones, committed in one
+        // count-flexible `restore` write (expect_hash catches a concurrent change).
+        var existing   = _allEntries.map(function(row) {
+            return row.split('|').slice(0, -1).join('|');
+        });
+        var merged     = existing.concat(records);
+        var hashBuf    = await crypto.subtle.digest('SHA-256', _TE.encode(existing.join('\n')));
+        var expectHash = bytesToHex(new Uint8Array(hashBuf));
+
+        say('Importing…');
+        var responseText = await _xhrPost('restore=1&expect_hash=' + expectHash
+                              + '&bulk_data=' + encodeURIComponent(merged.join('\n')));
+
+        // Existing entries keep their cached names; seed the new ones so they
+        // reveal instantly. Passwords unchanged → _mkCache and the rest stay.
+        for (var m = 0; m < records.length; m++) _v5Names.set(records[m], names[m]);
+        _lastRevealPw  = pw;
+        _lastRevealPw2 = pw2;
+        clearDisplay();
+        try { _applyServerResponse(responseText); } catch (_) { location.reload(); return; }
+        _revealCachedV5Buttons();
+        _signAfterWrite();
+        say('');
+        showToast('Imported ' + records.length + ' entries from ' + sourceLabel
+                  + (skipped ? ' (' + skipped + ' skipped)' : ''));
+    } catch (e) {
+        if (e.stale) {
+            say('The vault changed during import — nothing was modified. Reload and retry.');
+        } else {
+            say(sourceLabel + ' import failed — ' + e.message + '. The vault was not modified.');
+        }
+    } finally {
+        _importBusy = false;
+    }
+}
+
+// Generic transient hidden-input file picker (same idiom as scanQRCode /
+// _importCsvClick), parameterised by accept filter and the handler to run.
+function _pickImportFile(accept, handler) {
+    if (_importBusy) return;
+    var fileInput = document.createElement('input');
+    fileInput.type   = 'file';
+    fileInput.accept = accept;
+    fileInput.style.cssText = 'position:fixed;top:0;left:0;opacity:0;pointer-events:none';
+    document.body.appendChild(fileInput);
+    fileInput.addEventListener('change', function() {
+        var file = fileInput.files[0];
+        if (fileInput.parentNode) document.body.removeChild(fileInput);
+        if (file) handler(file);
+    });
+    window.addEventListener('focus', function onFocus() {
+        window.removeEventListener('focus', onFocus);
+        setTimeout(function() { if (fileInput.parentNode) document.body.removeChild(fileInput); }, 500);
+    }, { once: true });
+    fileInput.click();
+}
+
+// ---- KeePass 2 XML import -------------------------------------------------
+// The unencrypted "File → Export → KeePass XML (2.x)" format from KeePass /
+// KeePassXC. (The encrypted .kdbx binary is intentionally NOT supported — a
+// full KDBX crypto parser can't be loaded under our CSP; export to XML or CSV
+// from KeePass first.)
+async function _importKeepassFile(file) {
+    var out = document.getElementById('import-status');
+    function say(msg) { if (out) { out.style.display = ''; out.textContent = msg; } }
+    if (!_isVaultUnlocked()) { say('Enter both passwords and unlock the vault first.'); return; }
+    var text;
+    try { text = await _readFileText(file); }
+    catch (e) { say('Import failed — ' + e.message); return; }
+    var res;
+    try { res = _parseKeepassXml(text); }
+    catch (e) { say('Could not parse that file as KeePass XML — ' + e.message); return; }
+    if (!res.parsed.length) {
+        say('No entries found. In KeePass/KeePassXC use File → Export → KeePass XML (2.x).');
+        return;
+    }
+    return _importParsedEntries(res.parsed, res.skipped, 'KeePass XML');
+}
+
+function _parseKeepassXml(text) {
+    var doc = new DOMParser().parseFromString(text, 'application/xml');
+    if (doc.getElementsByTagName('parsererror').length) throw new Error('malformed XML');
+    if (!doc.getElementsByTagName('KeePassFile').length) throw new Error('not a KeePass XML export');
+    var nowSec = Math.floor(Date.now() / 1000);
+    var STD = { title: 1, username: 1, password: 1, url: 1, notes: 1 };
+    var parsed = [], skipped = 0;
+    var entries = doc.getElementsByTagName('Entry');
+    for (var i = 0; i < entries.length; i++) {
+        var e = entries[i];
+        // Skip history snapshots (an <Entry> nested inside a <History>).
+        var anc = e.parentNode, inHist = false;
+        while (anc) { if (anc.nodeName === 'History') { inHist = true; break; } anc = anc.parentNode; }
+        if (inHist) continue;
+
+        var map = {}, extra = [], token = '';
+        var kids = e.children || [];
+        for (var s = 0; s < kids.length; s++) {
+            if (kids[s].nodeName !== 'String') continue;
+            var keyEl = kids[s].getElementsByTagName('Key')[0];
+            var valEl = kids[s].getElementsByTagName('Value')[0];
+            if (!keyEl) continue;
+            var key = (keyEl.textContent || '').trim();
+            var val = valEl ? (valEl.textContent || '') : '';
+            var lk  = key.toLowerCase();
+            if (lk === 'otp' || lk === 'otpauth') { if (val.trim()) token = val.trim(); continue; }
+            if (lk === 'totp seed')     { if (val.trim() && !token) token = val.trim().replace(/\s+/g, ''); continue; }
+            if (lk === 'totp settings') { continue; }
+            if (STD[lk]) { map[lk] = val; continue; }
+            if (key && val) {
+                var prot = valEl && valEl.getAttribute('ProtectInMemory') === 'True';
+                extra.push({ label: key, value: val, secret: !!prot });
+            }
+        }
+        // Tags: a <Tags> child plus the containing group names (skipping "Root").
+        var tagParts = [];
+        for (var t = 0; t < kids.length; t++) {
+            if (kids[t].nodeName === 'Tags' && kids[t].textContent) tagParts.push(kids[t].textContent.replace(/;/g, ','));
+        }
+        var g = e.parentNode;
+        while (g && g.nodeName === 'Group') {
+            var gKids = g.children || [];
+            for (var gi = 0; gi < gKids.length; gi++) {
+                if (gKids[gi].nodeName === 'Name') {
+                    var gn = (gKids[gi].textContent || '').trim();
+                    if (gn && gn.toLowerCase() !== 'root') tagParts.push(gn);
+                    break;
+                }
+            }
+            g = g.parentNode;
+        }
+
+        var name = ((map.title || '').trim() || (map.username || '').trim()
+                    || (map.url || '').trim()).replace(/\|/g, ' ').trim();
+        if (!name && !token) { skipped++; continue; }
+        if (!name) name = 'Untitled';
+        parsed.push({
+            name: name,
+            fields: {
+                url: map.url || '', username: map.username || '', password: map.password || '',
+                token: token, notes: map.notes || '',
+                tags: _normalizeTags(tagParts.join(',')),
+                extra: extra, history: [], pwModified: nowSec, created: nowSec
+            }
+        });
+    }
+    return { parsed: parsed, skipped: skipped };
+}
+
+// ---- 1Password .1pux import -----------------------------------------------
+// .1pux is a ZIP archive holding an `export.data` JSON. We read it with a tiny
+// dependency-free ZIP reader + the browser's DecompressionStream (no library,
+// CSP-clean). Attachments inside the archive are ignored.
+async function _import1puxFile(file) {
+    var out = document.getElementById('import-status');
+    function say(msg) { if (out) { out.style.display = ''; out.textContent = msg; } }
+    if (!_isVaultUnlocked()) { say('Enter both passwords and unlock the vault first.'); return; }
+    if (typeof DecompressionStream === 'undefined') {
+        say('This browser can’t read .1pux (no DecompressionStream). Export 1Password as CSV instead.');
+        return;
+    }
+    var buf;
+    try { buf = await file.arrayBuffer(); }
+    catch (e) { say('Import failed — ' + e.message); return; }
+    var jsonBytes;
+    try { jsonBytes = await _zipReadEntry(buf, function(n) { return /(^|\/)export\.data$/.test(n); }); }
+    catch (e) { say('Could not read that .1pux archive — ' + e.message); return; }
+    if (!jsonBytes) { say('That .1pux has no export.data — is it a 1Password export?'); return; }
+    var res;
+    try { res = _parse1pux(new TextDecoder().decode(jsonBytes)); }
+    catch (e) { say('Could not parse the 1Password data — ' + e.message); return; }
+    if (!res.parsed.length) { say('No entries found in that .1pux.'); return; }
+    return _importParsedEntries(res.parsed, res.skipped, '1Password');
+}
+
+// Minimal ZIP reader: find one entry by name predicate and return its bytes.
+// Reads the End-Of-Central-Directory + central directory (no ZIP64). Supports
+// stored (method 0) and deflate (method 8 via DecompressionStream).
+async function _zipReadEntry(buf, predicate) {
+    var dv = new DataView(buf), u8 = new Uint8Array(buf), dec = new TextDecoder();
+    var eocd = -1, min = Math.max(0, u8.length - 22 - 65536);
+    for (var i = u8.length - 22; i >= min; i--) {
+        if (dv.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
+    }
+    if (eocd < 0) throw new Error('not a ZIP file');
+    var cdCount = dv.getUint16(eocd + 10, true);
+    var p = dv.getUint32(eocd + 16, true);
+    for (var c = 0; c < cdCount; c++) {
+        if (dv.getUint32(p, true) !== 0x02014b50) break;
+        var method   = dv.getUint16(p + 10, true);
+        var compSize = dv.getUint32(p + 20, true);
+        var fnLen    = dv.getUint16(p + 28, true);
+        var extraLen = dv.getUint16(p + 30, true);
+        var cmtLen   = dv.getUint16(p + 32, true);
+        var loOff    = dv.getUint32(p + 42, true);
+        var name     = dec.decode(u8.subarray(p + 46, p + 46 + fnLen));
+        if (predicate(name)) {
+            if (dv.getUint32(loOff, true) !== 0x04034b50) throw new Error('bad local header');
+            var lfn   = dv.getUint16(loOff + 26, true);
+            var lext  = dv.getUint16(loOff + 28, true);
+            var start = loOff + 30 + lfn + lext;
+            var comp  = u8.subarray(start, start + compSize);
+            if (method === 0) return comp.slice();
+            if (method === 8) return await _inflateRaw(comp);
+            throw new Error('unsupported compression method ' + method);
+        }
+        p += 46 + fnLen + extraLen + cmtLen;
+    }
+    return null;
+}
+
+async function _inflateRaw(bytes) {
+    var ds = new DecompressionStream('deflate-raw');
+    var stream = new Blob([bytes]).stream().pipeThrough(ds);
+    var ab = await new Response(stream).arrayBuffer();
+    return new Uint8Array(ab);
+}
+
+// Parse a 1Password export.data JSON into [{name, fields}]. Defensive against
+// schema variation across 1pux versions: anything it can't map is skipped.
+function _parse1pux(jsonText) {
+    var data = JSON.parse(jsonText);
+    var nowSec = Math.floor(Date.now() / 1000);
+    var parsed = [], skipped = 0;
+    var accounts = (data && data.accounts) || [];
+    accounts.forEach(function(acc) {
+        ((acc && acc.vaults) || []).forEach(function(vault) {
+            ((vault && vault.items) || []).forEach(function(wrap) {
+                var it = (wrap && wrap.item) ? wrap.item : wrap;
+                if (!it || it.trashed === true || it.state === 'trashed') return;
+                var ov = it.overview || {}, det = it.details || {};
+                var title = (ov.title || '').trim();
+                var url = ov.url || '';
+                if (!url && Array.isArray(ov.urls) && ov.urls.length) url = ov.urls[0].url || ov.urls[0].u || '';
+
+                var username = '', password = '', token = '';
+                (det.loginFields || []).forEach(function(f) {
+                    var des = (f.designation || f.name || '').toLowerCase();
+                    if (des === 'username' && !username) username = f.value || '';
+                    else if (des === 'password' && !password) password = f.value || '';
+                });
+                if (!password && det.password) password = det.password;
+
+                var extra = [];
+                (det.sections || []).forEach(function(sec) {
+                    (sec.fields || []).forEach(function(f) {
+                        var v = f.value || {};
+                        if (v.totp && !token) { token = v.totp; return; }
+                        var label = (f.title || f.id || '').trim();
+                        var val = v.string != null ? v.string
+                                : v.concealed != null ? v.concealed
+                                : v.email != null ? v.email
+                                : v.url != null ? v.url
+                                : v.phone != null ? v.phone
+                                : (typeof v === 'string' ? v : '');
+                        if (label && val) extra.push({ label: label, value: String(val), secret: v.concealed != null });
+                    });
+                });
+
+                var notes = det.notesPlain || '';
+                var tags  = Array.isArray(ov.tags) ? ov.tags.join(',') : (ov.tags || '');
+                var name  = (title || username || url).replace(/\|/g, ' ').trim();
+                if (!name && !password && !token) { skipped++; return; }
+                if (!name) name = 'Untitled';
+                parsed.push({
+                    name: name,
+                    fields: {
+                        url: url, username: username, password: password, token: token,
+                        notes: notes, tags: _normalizeTags(tags),
+                        extra: extra, history: [], pwModified: nowSec, created: nowSec
+                    }
+                });
+            });
+        });
+    });
+    return { parsed: parsed, skipped: skipped };
+}
+
 // Decrypt every record with the given passwords and feed (record, name, fields)
 // to `handler`, with the same bounded concurrency as reveal-all (Argon2id runs
 // on the worker pool). All-or-nothing: the first failure aborts the run and
@@ -3393,27 +4969,21 @@ async function _forEachRecordDecrypt(pw, pw2, handler, progressCb, rowsIn) {
         return row.split('|').slice(0, -1).join('|');
     });
     var results = new Array(rows.length);
-    var nextIdx = 0, done = 0, failed = null;
-    async function worker() {
-        while (nextIdx < rows.length && failed === null) {
-            var i = nextIdx++;
-            var p = rows[i].split('|');
-            try {
-                var name   = await decryptName(pw, pw2, p[2], p[3], p[4], p[5], p[0]);
-                var fields = await decryptFields(pw, pw2, p[2], p[3], p[6], p[7], p[8], p[9], p[10]);
-                results[i] = await handler(rows[i], name, fields, i);
-            } catch (e) {
-                if (failed === null) failed = { index: i, error: e };
-                return;
-            }
-            done++;
-            if (progressCb) progressCb(done, rows.length);
+    var done = 0, failed = null;
+    // All-or-nothing: returning false from the item fn stops the whole pool.
+    await _runPool(rows.length, async function(i) {
+        var p = rows[i].split('|');
+        try {
+            var name   = await decryptName(pw, pw2, p[2], p[3], p[4], p[5], p[0]);
+            var fields = await decryptFields(pw, pw2, p[2], p[3], p[6], p[7], p[8], p[9], p[10]);
+            results[i] = await handler(rows[i], name, fields, i);
+        } catch (e) {
+            if (failed === null) failed = { index: i, error: e };
+            return false;
         }
-    }
-    var pool = [];
-    var conc = _revealConcurrency();
-    for (var w = 0; w < conc && w < rows.length; w++) pool.push(worker());
-    await Promise.all(pool);
+        done++;
+        if (progressCb) progressCb(done, rows.length);
+    });
     if (failed) {
         throw new Error('record ' + (failed.index + 1) + ' of ' + rows.length
                         + ' failed to decrypt (wrong passwords?)');
@@ -3426,17 +4996,29 @@ async function _forEachRecordDecrypt(pw, pw2, handler, progressCb, rowsIn) {
 async function auditVault() {
     var pw  = document.getElementById('aeskey').value;
     var pw2 = document.getElementById('aeskey2').value;
-    var out = document.getElementById('audit-result');
+    var out    = document.getElementById('audit-result');
+    var locked = document.getElementById('audit-locked');
     if (!out) return;
+    if (!_isVaultUnlocked()) {
+        out.style.display = 'none';
+        if (locked) locked.style.display = '';
+        return;
+    }
+    if (locked) locked.style.display = 'none';
     out.style.display = '';
-    if (!_isVaultUnlocked()) { out.textContent = 'Enter both passwords and unlock the vault first.'; return; }
     if (!_allEntries.length) { out.textContent = 'Vault is empty.'; return; }
 
     out.textContent = 'Auditing… 0 / ' + _allEntries.length;
     var items;
     try {
         items = await _forEachRecordDecrypt(pw, pw2, function(rec, name, fields) {
-            return { name: name, password: (fields.password || '').trim() };
+            return {
+                name: name,
+                isNote: fields.type === 'note',
+                password: (fields.password || '').trim(),
+                pwModified: (typeof fields.pwModified === 'number') ? fields.pwModified : null,
+                hasPasskey: !!(fields.passkey && fields.passkey.rpId)
+            };
         }, function(done, total) {
             out.textContent = 'Auditing… ' + done + ' / ' + total;
         });
@@ -3446,9 +5028,16 @@ async function auditVault() {
     }
 
     var byPassword = new Map();
-    var weak = [], fair = [], empty = [];
+    var weak = [], fair = [], empty = [], old = [];
+    var ageCut = Math.floor(Date.now() / 1000) - _PW_AGE_WARN_DAYS * 86400;
     items.forEach(function(it) {
-        if (!it.password) { empty.push(it.name); return; }
+        // A secure note has no password to audit — skip it entirely.
+        if (it.isNote) return;
+        // Password age: only entries that carry a pwModified stamp can be aged
+        // (legacy entries get one the next time they're saved).
+        if (it.pwModified && it.pwModified < ageCut) old.push(it.name);
+        // A passkey-only entry legitimately has no password — don't flag it as empty.
+        if (!it.password) { if (!it.hasPasskey) empty.push(it.name); return; }
         var bits = _estimateBits(it.password);
         if (bits < 40) weak.push(it.name);
         else if (bits < 80) fair.push(it.name);
@@ -3465,8 +5054,8 @@ async function auditVault() {
         d.textContent = txt;
         out.appendChild(d);
     }
-    if (!reused.length && !weak.length && !fair.length && !empty.length) {
-        addLine('✓ No reused, weak, fair, or empty passwords across '
+    if (!reused.length && !weak.length && !fair.length && !empty.length && !old.length) {
+        addLine('✓ No reused, weak, fair, empty, or stale passwords across '
                 + items.length + ' entries.', 'audit-ok');
         return;
     }
@@ -3477,6 +5066,211 @@ async function auditVault() {
     if (weak.length)  addLine('⚠ Weak (under 40 bits): ' + weak.join(', '), 'audit-warn');
     if (fair.length)  addLine('⚠ Fair (40–80 bits): ' + fair.join(', '), 'audit-warn');
     if (empty.length) addLine('— No password stored: ' + empty.join(', '), 'audit-warn');
+    if (old.length)   addLine('⏱ Not changed in over a year: ' + old.join(', '), 'audit-warn');
+}
+
+// Inventory of stored passkeys: decrypt every payload locally and list the
+// entries whose payload carries a passkey sub-object (name + rpId only — never
+// any key material). Mirrors auditVault()'s locked-check + _forEachRecordDecrypt
+// pattern. The PWA only views/deletes passkeys; creation + signing live in the
+// browser extensions.
+async function listPasskeys() {
+    var pw  = document.getElementById('aeskey').value;
+    var pw2 = document.getElementById('aeskey2').value;
+    var out    = document.getElementById('passkey-result');
+    var locked = document.getElementById('passkey-locked');
+    if (!out) return;
+    if (!_isVaultUnlocked()) {
+        out.style.display = 'none';
+        if (locked) locked.style.display = '';
+        return;
+    }
+    if (locked) locked.style.display = 'none';
+    out.style.display = '';
+    if (!_allEntries.length) { out.textContent = 'Vault is empty.'; return; }
+
+    out.textContent = 'Scanning… 0 / ' + _allEntries.length;
+    var items;
+    try {
+        items = await _forEachRecordDecrypt(pw, pw2, function(rec, name, fields) {
+            var pk = fields.passkey;
+            if (!pk || !pk.rpId) return null;
+            return { name: name, rpId: pk.rpId, createdAt: pk.createdAt || null };
+        }, function(done, total) {
+            out.textContent = 'Scanning… ' + done + ' / ' + total;
+        });
+    } catch (e) {
+        out.textContent = 'Passkey scan failed — ' + e.message;
+        return;
+    }
+
+    var found = items.filter(function(it) { return it; });
+    out.textContent = '';
+    if (!found.length) {
+        var none = document.createElement('div');
+        none.className = 'audit-line audit-ok';
+        none.textContent = 'No passkeys stored in this vault.';
+        out.appendChild(none);
+        return;
+    }
+
+    var hdr = document.createElement('div');
+    hdr.className = 'pk-hdr';
+    var icon = document.createElement('span');
+    icon.className = 'pk-hdr-icon';
+    icon.textContent = '🔐';
+    var cnt = document.createElement('span');
+    cnt.textContent = found.length + (found.length === 1 ? ' passkey stored' : ' passkeys stored');
+    hdr.appendChild(icon);
+    hdr.appendChild(cnt);
+    out.appendChild(hdr);
+
+    found.forEach(function(it) {
+        var row = document.createElement('div');
+        row.className = 'pk-row';
+        var info = document.createElement('div');
+        info.className = 'pk-info';
+        var nm = document.createElement('span');
+        nm.className = 'pk-name';
+        nm.textContent = it.name;
+        var meta = document.createElement('span');
+        meta.className = 'pk-meta';
+        var when = it.createdAt ? new Date(it.createdAt) : null;
+        meta.textContent = it.rpId
+            + (when && !isNaN(when.getTime()) ? ' · created ' + when.toLocaleDateString() : '');
+        info.appendChild(nm);
+        info.appendChild(meta);
+        row.appendChild(info);
+        out.appendChild(row);
+    });
+}
+
+// ── Trash (soft delete) ─────────────────────────────────────────────────────
+// Deleted entries are kept server-side in `trash` (see post.php). This lists them
+// (names decrypted locally), and restores or permanently purges them. Both
+// passwords are required to read the names.
+var _trashBusy = false;
+async function openTrash() {
+    var out    = document.getElementById('trash-result');
+    var locked = document.getElementById('trash-locked');
+    if (!out) return;
+    if (!_isVaultUnlocked()) {
+        out.style.display = 'none';
+        if (locked) locked.style.display = '';
+        return;
+    }
+    if (locked) locked.style.display = 'none';
+    out.style.display = '';
+    if (_trashBusy) return;
+    _trashBusy = true;
+    out.textContent = 'Loading trash…';
+    try {
+        var resp = JSON.parse(await _xhrPost('trash=1'));
+        var rows = (resp && Array.isArray(resp.trash)) ? resp.trash : [];
+        await _renderTrash(rows);
+    } catch (e) {
+        out.textContent = 'Could not load trash — ' + e.message;
+    } finally {
+        _trashBusy = false;
+    }
+}
+
+async function _renderTrash(rows) {
+    var out = document.getElementById('trash-result');
+    if (!out) return;
+    out.textContent = '';
+    if (!rows.length) { out.textContent = 'Trash is empty.'; return; }
+
+    var pw  = document.getElementById('aeskey').value;
+    var pw2 = document.getElementById('aeskey2').value;
+
+    var hdr = document.createElement('div');
+    hdr.className = 'trash-hdr';
+    var cnt = document.createElement('span');
+    cnt.textContent = rows.length + (rows.length === 1 ? ' deleted entry' : ' deleted entries');
+    var emptyBtn = document.createElement('button');
+    emptyBtn.className = 'btn btn-ghost';
+    emptyBtn.textContent = '🗑 Empty Trash';
+    emptyBtn.onclick = function() { _emptyTrash(); };
+    hdr.appendChild(cnt);
+    hdr.appendChild(emptyBtn);
+    out.appendChild(hdr);
+
+    // Decrypt every trashed entry's name (worker pool throttles the Argon2id work);
+    // a wrong key / corrupt record leaves a locked placeholder rather than failing.
+    await Promise.all(rows.map(async function(item) {
+        try {
+            var p = item.record.split('|');
+            item._name = await decryptName(pw, pw2, p[2], p[3], p[4], p[5], p[0]);
+        } catch (_) {
+            item._name = '🔒 (locked)';
+        }
+    }));
+
+    rows.forEach(function(item) {
+        var locked = item._name === '🔒 (locked)';
+        var row = document.createElement('div');
+        row.className = 'trash-row';
+        var info = document.createElement('div');
+        info.className = 'trash-info';
+        var nm = document.createElement('span');
+        nm.className = 'trash-name';
+        nm.textContent = item._name;
+        var dt = document.createElement('span');
+        dt.className = 'trash-date';
+        dt.textContent = 'deleted ' + _fmtDate(item.ts);
+        info.appendChild(nm);
+        info.appendChild(dt);
+        var restore = document.createElement('button');
+        restore.className = 'btn-sm';
+        restore.textContent = 'Restore';
+        restore.onclick = function() { _restoreTrash(item.record, locked ? null : item._name); };
+        var del = document.createElement('button');
+        del.className = 'btn-sm trash-del';
+        del.textContent = 'Delete';
+        del.title = 'Delete permanently';
+        del.onclick = function() {
+            if (confirm('Permanently delete ' + (locked ? 'this entry' : '"' + item._name + '"')
+                        + '? This cannot be undone.')) _purgeTrash(item.record);
+        };
+        row.appendChild(info);
+        row.appendChild(restore);
+        row.appendChild(del);
+        out.appendChild(row);
+    });
+}
+
+function _restoreTrash(record, name) {
+    if (name) _v5Names.set(record, name);   // pre-seed for instant reveal
+    _xhrPost('untrash_rec=' + encodeURIComponent(record))
+        .then(function(text) {
+            try { if (_applyServerResponse(text)) _revealCachedV5Buttons(); }
+            catch (_) { location.reload(); return; }
+            _signAfterWrite();
+            showToast('Restored "' + (name || 'entry') + '"');
+            openTrash();
+        })
+        .catch(function(e) {
+            if (e.stale) {
+                showToast('Vault changed elsewhere — reloading');
+                setTimeout(function() { location.reload(); }, 1200);
+                return;
+            }
+            showToast('Restore failed — ' + e.message);
+        });
+}
+
+function _purgeTrash(record) {
+    _xhrPost('purge_trash=' + encodeURIComponent(record))
+        .then(function() { showToast('Permanently deleted'); openTrash(); })
+        .catch(function(e) { showToast('Delete failed — ' + e.message); });
+}
+
+function _emptyTrash() {
+    if (!confirm('Permanently delete everything in the trash? This cannot be undone.')) return;
+    _xhrPost('purge_trash=__all__')
+        .then(function() { showToast('Trash emptied'); openTrash(); })
+        .catch(function(e) { showToast('Empty trash failed — ' + e.message); });
 }
 
 // True only when both key fields are filled AND those passwords have already
@@ -3528,11 +5322,54 @@ function toggleChpwShow(cb) {
     });
 }
 
-// Re-encrypt the whole vault under new master passwords. Fully client-side
-// decrypt + re-encrypt, then an atomic whole-file replace via post.php's bulk
-// mode. The server verifies a hash of the snapshot we re-encrypted and refuses
-// (409) if `lines` changed meanwhile, so a concurrent write can never be lost
-// and the vault is never half-rekeyed.
+// Shared whole-vault re-encrypt + atomic bulk-replace core, used by both Change
+// Passwords and Change KDF Parameters. Decrypts every record with the dec*
+// passwords (at the active _vaultKdf), re-encrypts each with the enc* passwords
+// and `opts.kdf` (fresh salts/nonces per record), then commits one bulk write.
+// The server verifies a SHA-256 of the snapshot we re-encrypted and refuses (409)
+// if `lines` changed meanwhile, so a concurrent write can never be lost and the
+// vault is never half-rewritten. `opts.onCommitted` runs after the write succeeds
+// but before the name-cache reseed/reveal, so the caller can switch session state
+// (new passwords, or the new KDF cost) at exactly the right moment. Returns
+// { reloaded } — when true the page is navigating away and the caller must bail.
+// Throws on failure (err.stale === true on a 409); nothing is changed in that case.
+async function _reencryptVault(opts) {
+    var statusEl = opts.statusEl;
+    function say(m) { if (statusEl) statusEl.textContent = m; }
+    var total = _allEntries.length;
+    say('Re-encrypting… 0 / ' + total);
+    var pairs = await _forEachRecordDecrypt(opts.decPw1, opts.decPw2, async function(rec, name, fields) {
+        var s1 = crypto.getRandomValues(new Uint8Array(32));
+        var s2 = crypto.getRandomValues(new Uint8Array(32));
+        var ne = await encryptName(opts.encPw1, opts.encPw2, s1, s2, name, opts.kdf);
+        var rf = await encryptFields(opts.encPw1, opts.encPw2, s1, s2, fields, opts.kdf);
+        return { newRec: _assembleRecord(ne, rf, s1, s2), name: name };
+    }, function(done) { say('Re-encrypting… ' + done + ' / ' + total); });
+
+    // expect_hash over the snapshot we just re-encrypted — same canonical join
+    // post.php uses (records minus trailing index, "\n"-joined, no trailing NL).
+    var expectHash = (await _currentVaultHash()).hash;
+
+    say('Saving…');
+    var body = 'bulk=1&expect_hash=' + expectHash
+             + '&bulk_data=' + encodeURIComponent(pairs.map(function(p) { return p.newRec; }).join('\n'));
+    if (opts.kdf) body += '&kdf=' + encodeURIComponent(_kdfToString(opts.kdf));
+    var responseText = await _xhrPost(body);
+
+    // Committed server-side — let the caller switch session state first.
+    if (opts.onCommitted) opts.onCommitted();
+
+    // Pre-seed the name cache so the rebuilt grid reveals instantly.
+    _v5Names.clear();
+    pairs.forEach(function(p) { _v5Names.set(p.newRec, p.name); });
+    clearDisplay();
+    try { _applyServerResponse(responseText); } catch (_) { location.reload(); return { reloaded: true }; }
+    _revealCachedV5Buttons();
+    _signAfterWrite();
+    return { reloaded: false };
+}
+
+// Re-encrypt the whole vault under new master passwords (see _reencryptVault).
 async function changeMasterPasswords() {
     var pw  = document.getElementById('aeskey').value;
     var pw2 = document.getElementById('aeskey2').value;
@@ -3554,52 +5391,20 @@ async function changeMasterPasswords() {
     if (btn) btn.disabled = true;
     var total = _allEntries.length;
     try {
-        say('Re-encrypting… 0 / ' + total);
-        // Decrypt with the current passwords and re-encrypt with the new ones,
-        // fresh salts/nonces per record (same construction as saveEntry).
-        var pairs = await _forEachRecordDecrypt(pw, pw2, async function(rec, name, fields) {
-            var recSalt1 = crypto.getRandomValues(new Uint8Array(32));
-            var recSalt2 = crypto.getRandomValues(new Uint8Array(32));
-            var nameEnc = await encryptName(n1, n2, recSalt1, recSalt2, name);
-            var result  = await encryptFields(n1, n2, recSalt1, recSalt2, fields);
-            var newRec  = [nameEnc.encNameHex, 'v6',
-                           bytesToHex(recSalt1),  bytesToHex(recSalt2),
-                           nameEnc.nameNonce1Hex, nameEnc.nameNonce2Hex,
-                           result.iv1Hex,         result.nonce2Hex,
-                           result.nonce3Hex,      result.nonce4Hex,
-                           result.encHex].join('|');
-            return { newRec: newRec, name: name };
-        }, function(done) { say('Re-encrypting… ' + done + ' / ' + total); });
-
-        // Hash of the snapshot we just re-encrypted: records joined with "\n",
-        // no trailing newline — must match post.php's computation exactly.
-        var oldJoined = _allEntries.map(function(row) {
-            return row.split('|').slice(0, -1).join('|');
-        }).join('\n');
-        var hashBuf = await crypto.subtle.digest('SHA-256', _TE.encode(oldJoined));
-        var expectHash = bytesToHex(new Uint8Array(hashBuf));
-
-        say('Saving…');
-        var bulkData = pairs.map(function(p) { return p.newRec; }).join('\n');
-        var responseText = await _xhrPost('bulk=1&expect_hash=' + expectHash
-                                          + '&bulk_data=' + encodeURIComponent(bulkData));
-
-        // Committed server-side: switch this session to the new passwords and
-        // pre-seed the name cache so the rebuilt grid reveals instantly.
-        document.getElementById('aeskey').value  = n1;
-        document.getElementById('aeskey2').value = n2;
-        _mkCache.clear();
-        _v5Names.clear();
-        _lastRevealPw  = null;
-        _lastRevealPw2 = null;
-        pairs.forEach(function(p) { _v5Names.set(p.newRec, p.name); });
-        clearDisplay();
-        try { _applyServerResponse(responseText); } catch (_) { location.reload(); return; }
-        _revealCachedV5Buttons();
-        // Re-sign under the NEW passwords (the key fields were just switched).
-        // The old manifest's salts are reused — Argon2id(new pw, old salt) is a
-        // fresh independent key, and the revision chain stays unbroken.
-        _signAfterWrite();
+        var r = await _reencryptVault({
+            decPw1: pw, decPw2: pw2, encPw1: n1, encPw2: n2, statusEl: status,
+            onCommitted: function() {
+                // Switch this session to the new passwords before the cache reseed,
+                // so the reveal (and the re-sign under the NEW passwords — old
+                // manifest salts reused, revision chain unbroken) use the new keys.
+                document.getElementById('aeskey').value  = n1;
+                document.getElementById('aeskey2').value = n2;
+                _mkCache.clear();
+                _lastRevealPw  = null;
+                _lastRevealPw2 = null;
+            }
+        });
+        if (r.reloaded) return;
         ['newpw1', 'newpw1c', 'newpw2', 'newpw2c'].forEach(function(id) {
             document.getElementById(id).value = '';
         });
@@ -3700,6 +5505,52 @@ function toggleChangeKdf() {
     if (btn && btn.scrollIntoView) btn.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
 
+// Benchmark Argon2id on THIS device and suggest an iteration count that lands
+// near a target wall-clock time, holding the chosen memory fixed. Argon2id cost
+// is ~linear in iterations, so we time one hash at the minimum t and scale up.
+// Writes the suggestion into the mem/iterations inputs (the user still presses
+// Re-encrypt). Uses the in-process argon2idHash (single derivation = single
+// thread, which matches the per-record cost the user actually pays).
+async function _kdfCalibrate() {
+    var status = document.getElementById('kdf-cal-status');
+    function say(m) { if (status) status.textContent = m; }
+    var btn = document.getElementById('btn-kdf-cal');
+
+    var memMiB = parseInt(document.getElementById('kdf-mem').value, 10);
+    if (!isFinite(memMiB)) memMiB = Math.round(_vaultKdf.memorySize / 1024);
+    memMiB = Math.min(KDF_MEM_MAX_KIB / 1024, Math.max(KDF_MEM_MIN_KIB / 1024, memMiB));
+    var targetMs = parseInt(document.getElementById('kdf-target').value, 10);
+    if (!isFinite(targetMs) || targetMs < 100) targetMs = 500;
+
+    if (typeof argon2idHash !== 'function') { say('Argon2id is not available in this browser.'); return; }
+    if (btn) btn.disabled = true;
+    say('Benchmarking at ' + memMiB + ' MiB…');
+    try {
+        var pw   = new TextEncoder().encode('calibration-benchmark');
+        var salt = crypto.getRandomValues(new Uint8Array(32));
+        var memKiB = memMiB * 1024;
+        var opts = { iterations: KDF_TIME_MIN, memorySize: memKiB, parallelism: 1, hashLength: 32 };
+        // Warm-up run (compiles/primes the WASM) is discarded; then a timed run.
+        await argon2idHash(pw, salt, opts);
+        var t0 = performance.now();
+        await argon2idHash(pw, salt, opts);
+        var perIter = (performance.now() - t0) / KDF_TIME_MIN;
+
+        var iters = Math.round(targetMs / perIter);
+        iters = Math.min(KDF_TIME_MAX, Math.max(KDF_TIME_MIN, iters));
+        document.getElementById('kdf-mem').value  = memMiB;
+        document.getElementById('kdf-time').value = iters;
+        _kdfSyncSlider();
+        var est = Math.round(perIter * iters);
+        say('Suggested: ' + memMiB + ' MiB, ' + iters + ' iter (~' + est + ' ms per derivation here). '
+            + 'Adjust memory and re-Calibrate, then Re-encrypt.');
+    } catch (e) {
+        say('Calibration failed: ' + (e && e.message ? e.message : e));
+    } finally {
+        if (btn) btn.disabled = false;
+    }
+}
+
 // Re-encrypt the whole vault at a new Argon2id cost. Identical shape to
 // changeMasterPasswords (same atomic bulk replace + 409 staleness handling), but
 // the passwords are unchanged: each record is decrypted with the OLD params
@@ -3734,46 +5585,21 @@ async function changeKdfParams() {
     if (btn) btn.disabled = true;
     var total = _allEntries.length;
     try {
-        say('Re-encrypting… 0 / ' + total);
-        var pairs = await _forEachRecordDecrypt(pw, pw2, async function(rec, name, fields) {
-            var recSalt1 = crypto.getRandomValues(new Uint8Array(32));
-            var recSalt2 = crypto.getRandomValues(new Uint8Array(32));
-            var nameEnc = await encryptName(pw, pw2, recSalt1, recSalt2, name, newKdf);
-            var result  = await encryptFields(pw, pw2, recSalt1, recSalt2, fields, newKdf);
-            var newRec  = [nameEnc.encNameHex, 'v6',
-                           bytesToHex(recSalt1),  bytesToHex(recSalt2),
-                           nameEnc.nameNonce1Hex, nameEnc.nameNonce2Hex,
-                           result.iv1Hex,         result.nonce2Hex,
-                           result.nonce3Hex,      result.nonce4Hex,
-                           result.encHex].join('|');
-            return { newRec: newRec, name: name };
-        }, function(done) { say('Re-encrypting… ' + done + ' / ' + total); });
-
-        // Hash of the snapshot we re-encrypted (records joined with "\n", no
-        // trailing newline) — must match post.php's computation exactly.
-        var oldJoined = _allEntries.map(function(row) {
-            return row.split('|').slice(0, -1).join('|');
-        }).join('\n');
-        var hashBuf = await crypto.subtle.digest('SHA-256', _TE.encode(oldJoined));
-        var expectHash = bytesToHex(new Uint8Array(hashBuf));
-
-        say('Saving…');
-        var bulkData = pairs.map(function(p) { return p.newRec; }).join('\n');
-        var responseText = await _xhrPost('bulk=1&expect_hash=' + expectHash
-                                          + '&bulk_data=' + encodeURIComponent(bulkData)
-                                          + '&kdf=' + encodeURIComponent(_kdfToString(newKdf)));
-
-        // Committed server-side: switch this session to the new cost. Passwords
-        // are unchanged, so the reveal throttle (_lastRevealPw/Pw2) stays valid.
-        _vaultKdf = newKdf;
-        _mkCache.clear();          // every cached key was derived at the old cost
-        _terminateArgonPool();     // rebuild the worker pool sized for the new memory cost
-        _v5Names.clear();
-        pairs.forEach(function(p) { _v5Names.set(p.newRec, p.name); });
-        clearDisplay();
-        try { _applyServerResponse(responseText); } catch (_) { location.reload(); return; }
-        _revealCachedV5Buttons();
-        _signAfterWrite();         // re-sign at the new cost — manifest follows
+        // Records are decrypted at the OLD cost (the _vaultKdf default inside
+        // _reencryptVault → _forEachRecordDecrypt) and re-encrypted at newKdf,
+        // which also rides the bulk write so lines + kdfparams change atomically.
+        var r = await _reencryptVault({
+            decPw1: pw, decPw2: pw2, encPw1: pw, encPw2: pw2, kdf: newKdf, statusEl: status,
+            onCommitted: function() {
+                // Passwords unchanged, so the reveal throttle stays valid; only
+                // the cost switches. Done after decrypt completes (decrypt used
+                // the old cost) and before the reseed/re-sign (which use the new).
+                _vaultKdf = newKdf;
+                _mkCache.clear();       // every cached key was derived at the old cost
+                _terminateArgonPool();  // rebuild the worker pool sized for the new memory cost
+            }
+        });
+        if (r.reloaded) return;
         say('');
         toggleChangeKdf();
         showToast('KDF parameters changed — ' + total + ' entries re-encrypted');
@@ -3794,6 +5620,12 @@ async function changeKdfParams() {
 function _clearVaultTools() {
     var out = document.getElementById('audit-result');
     if (out) { out.textContent = ''; out.style.display = 'none'; }
+    var auditLocked = document.getElementById('audit-locked');
+    if (auditLocked) auditLocked.style.display = 'none';
+    var pkOut = document.getElementById('passkey-result');
+    if (pkOut) { pkOut.textContent = ''; pkOut.style.display = 'none'; }
+    var pkLocked = document.getElementById('passkey-locked');
+    if (pkLocked) pkLocked.style.display = 'none';
     ['newpw1', 'newpw1c', 'newpw2', 'newpw2c'].forEach(function(id) {
         var el = document.getElementById(id);
         if (el) { el.value = ''; el.type = 'password'; }
@@ -3816,6 +5648,10 @@ function _clearVaultTools() {
     if (kl) kl.style.display = 'none';
     var ks = document.getElementById('kdf-status');
     if (ks) ks.textContent = '';
+    var tr = document.getElementById('trash-result');
+    if (tr) { tr.textContent = ''; tr.style.display = 'none'; }
+    var tl = document.getElementById('trash-locked');
+    if (tl) tl.style.display = 'none';
 }
 
 // ============================================================
@@ -3880,6 +5716,18 @@ async function _sha256Hex(str) {
     return bytesToHex(new Uint8Array(buf));
 }
 
+// Constant-time equality of two equal-length hex strings. Marginal value here —
+// the manifest HMAC compare runs client-side with no remotely observable timing
+// channel, and forging a manifest needs the password-derived vaultKey anyway —
+// but it's cheap hygiene for the one place an attacker-influenced HMAC (from the
+// served manifest) meets a locally derived one.
+function _constTimeHexEq(a, b) {
+    if (typeof a !== 'string' || typeof b !== 'string' || a.length !== b.length) return false;
+    var diff = 0;
+    for (var i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+    return diff === 0;
+}
+
 async function _manifestHmacHex(pw, pw2, salt1Hex, salt2Hex, revision, timestamp, records) {
     var mks = await Promise.all([
         deriveMasterKey(pw,  hexToBytes(salt1Hex)),
@@ -3942,7 +5790,7 @@ async function _verifyManifest(pw, pw2) {
         if (stored > 0) {
             // This device has seen a signed vault before — a now-missing
             // manifest is itself a tampering signal, not a fresh install.
-            _setIntegrityBadge('vi-fail', '✖ Integrity: manifest missing (this device last saw rev ' + stored + ')');
+            _setIntegrityBadge('vi-fail', '✖ Manifest missing (this device last saw rev ' + stored + ')');
             showToast('Vault integrity manifest is missing!');
         } else {
             _setIntegrityBadge('vi-warn', '⚠ Vault not signed yet — use Sign in About → Vault Tools');
@@ -3957,8 +5805,8 @@ async function _verifyManifest(pw, pw2) {
     }
     // Keys changed or a write landed while we were hashing — result is stale.
     if (gen !== _revealGen || _signPending) return;
-    if (h !== m.hmacHex) {
-        _setIntegrityBadge('vi-fail', '✖ INTEGRITY CHECK FAILED — Rev ' + m.revision + ' signature fail');
+    if (!_constTimeHexEq(h, m.hmacHex)) {
+        _setIntegrityBadge('vi-fail', '✖ CHECK FAILED — Rev ' + m.revision + ' signature fail');
         showToast('Vault integrity check FAILED');
         return;
     }
@@ -3968,7 +5816,7 @@ async function _verifyManifest(pw, pw2) {
         return;
     }
     _revSet(m.revision);
-    _setIntegrityBadge('vi-ok', '✓ Integrity verified · rev ' + m.revision + ' · ' + new Date(m.timestamp * 1000).toLocaleString());
+    _setIntegrityBadge('vi-ok', '✓ Verified · rev ' + m.revision + ' · ' + new Date(m.timestamp * 1000).toLocaleString());
 }
 
 // Sign the current record set and store the manifest server-side. Throws on
@@ -4056,7 +5904,7 @@ function showSearch() {
     var overlay = document.getElementById('search-overlay');
     var box     = document.getElementById('search-box');
     var fixedH  = document.getElementById('fixedDiv').offsetHeight;
-    box.style.marginTop = (fixedH + 8) + 'px';
+    box.style.marginTop = ((fixedH + 8) / 2) + 'px';
     overlay.classList.add('open');
     var inp = document.getElementById('search-input');
     inp.value = '';
@@ -4072,18 +5920,47 @@ function filterSearch(query) {
     var results  = document.getElementById('search-results');
     var countEl  = document.getElementById('search-count');
     results.innerHTML = '';
-    var q = query.trim().toLowerCase();
+    // A leading "#" searches tags, "@" searches notes, "!" searches custom fields
+    // (all via the _searchText index, populated on reveal/decode); otherwise match
+    // the entry name as before.
+    var raw   = query.trim();
+    var first = raw.charAt(0);
+    var mode  = first === '#' ? 'tags'
+              : first === '@' ? 'notes'
+              : first === '!' ? 'extra'
+              : 'name';
+    var q     = (mode === 'name' ? raw : raw.slice(1)).trim().toLowerCase();
     if (!q) {
         if (countEl) countEl.textContent = '';
         return;
     }
     var total   = _allEntries.length;
     var matched = _allEntries.filter(function(row) {
-        var parts = row.split('|');
-        var name = _v5Names.get(parts.slice(0, -1).join('|')) || '';
-        return name.toLowerCase().indexOf(q) !== -1;
+        var key = row.split('|').slice(0, -1).join('|');
+        if (mode === 'name') return (_v5Names.get(key) || '').toLowerCase().indexOf(q) !== -1;
+        var idx = _searchText.get(key);
+        return !!idx && (idx[mode] || '').indexOf(q) !== -1;
     });
-    if (countEl) countEl.textContent = matched.length + ' of ' + total + (total === 1 ? ' entry' : ' entries');
+    // Show results alphabetically by display name (locked 🔒 entries sink last).
+    matched.sort(function(a, b) {
+        var na = (_v5Names.get(a.split('|').slice(0, -1).join('|')) || '￿');
+        var nb = (_v5Names.get(b.split('|').slice(0, -1).join('|')) || '￿');
+        return na.localeCompare(nb, undefined, { sensitivity: 'base' });
+    });
+    if (countEl) {
+        var scope = mode === 'tags' ? 'tags'
+                  : mode === 'notes' ? 'notes'
+                  : mode === 'extra' ? 'custom fields'
+                  : 'names';
+        countEl.textContent = '';
+        var scopeEl = document.createElement('span');
+        scopeEl.className   = 'search-scope';
+        scopeEl.textContent = 'Searching ' + scope + '…';
+        var countTxt = document.createElement('span');
+        countTxt.textContent = matched.length + ' of ' + total + (total === 1 ? ' entry' : ' entries');
+        countEl.appendChild(scopeEl);
+        countEl.appendChild(countTxt);
+    }
     if (matched.length === 0) {
         var msg = document.createElement('div');
         msg.id = 'search-no-match';
@@ -4091,16 +5968,109 @@ function filterSearch(query) {
         results.appendChild(msg);
         return;
     }
+    // When Group A–Z is on, insert sticky first-letter headers before each
+    // letter run (same scheme as the main entry grid).
+    var curKey = null;
     matched.forEach(function(row) {
         var parts = row.split('|');
         var displayName = _v5Names.get(parts.slice(0, -1).join('|')) || '🔒';
+        if (_groupEntries && displayName !== '🔒') {
+            var key = _entryGroupKey(displayName);
+            if (key !== curKey) {
+                curKey = key;
+                var h = document.createElement('div');
+                h.className = 'entry-group-hdr';
+                h.textContent = key;
+                h.setAttribute('aria-hidden', 'true');
+                results.appendChild(h);
+            }
+        }
         var btn = document.createElement('button');
         btn.className   = 'entry-btn';
-        btn.textContent = displayName;
         btn.title       = displayName;
-        btn.onclick = function() { hideSearch(); decodeLine(btn, row); };
+        if (displayName !== '🔒') {
+            var sav = document.createElement('span');
+            sav.className   = 'entry-avatar';
+            sav.textContent = _avatarLetter(displayName);
+            sav.style.background = _avatarColor(displayName);
+            sav.setAttribute('aria-hidden', 'true');
+            btn.appendChild(sav);
+        }
+        var lbl = document.createElement('span');
+        lbl.className   = 'entry-btn-lbl';
+        lbl.textContent = displayName;
+        btn.appendChild(lbl);
+        btn.onclick = function() {
+            // Selecting a search result should decode (and highlight/scroll-to)
+            // the matching button in the main grid, not this disposable overlay
+            // button — _selectBtn/blinkTD inside decodeLine only have lasting
+            // effect on a button that's still in the DOM after hideSearch().
+            var gridBtn = _findGridBtn(row);
+            hideSearch();
+            // Scroll only AFTER decodeLine resolves: it expands the decode panel
+            // (notes/tags/custom-field rows) and re-sorts the grid, both of which
+            // move things and call resizeFreezePane(). The gridBtn node reference
+            // survives the re-sort (nodes are re-appended, not recreated), so it
+            // still points at the right button afterward.
+            //
+            // The panel growth enlarges #content's margin-top — i.e. content
+            // *above* the viewport grows — so the browser's scroll-anchoring adds
+            // to scrollTop to keep the visible anchor stable. That adjustment lands
+            // a frame later, *after* a scroll computed in this microtask, and being
+            // positive it cancels an upward (negative) scroll — so the target stays
+            // parked behind a tall panel when scrolling up (worse the taller the
+            // panel). Defer to a double rAF so the margin change is laid out and
+            // anchoring has settled before we measure + do the single smooth scroll;
+            // nothing resizes after that, so the scroll lands and stays.
+            Promise.resolve(decodeLine(gridBtn || btn, row)).then(function() {
+                requestAnimationFrame(function() {
+                    requestAnimationFrame(function() {
+                        _scrollGridBtnIntoView(gridBtn);
+                    });
+                });
+            });
+        };
         results.appendChild(btn);
     });
+}
+
+// Locate the main-grid button for a given full record string (data-row is set
+// verbatim from _allEntries, so an exact string match is sufficient).
+function _findGridBtn(row) {
+    var found = null;
+    document.querySelectorAll('.entry-grid .entry-btn').forEach(function(b) {
+        if (b.dataset.row === row) found = b;
+    });
+    return found;
+}
+
+// Native scrollIntoView has no notion of #fixedDiv (position:fixed, sits on
+// top of the grid) or the sticky letter-group header, so a plain
+// scrollIntoView({block:'nearest'}) can park the target right behind either —
+// "selected but not scrolled to completely". Compute the obscured band
+// ourselves and scroll just far enough that the button clears it.
+function _scrollGridBtnIntoView(btn) {
+    if (!btn) return;
+    var wide    = document.body.classList.contains('wide-controls');
+    var fixedDiv = document.getElementById('fixedDiv');
+    // The fixed top band covers [0, panelH] full-width in BOTH layouts and the
+    // grid (#content margin-top = panelH) scrolls under it: narrow = the panel
+    // alone; wide = the panel on the left + the floated .ctrl-form on the right,
+    // both height panelH. So the obscured band is the panel height either way —
+    // using 0 in wide mode parked the target behind that band when scrolling up.
+    var topGap  = fixedDiv ? fixedDiv.offsetHeight : 0;
+    // Narrow mode pins group headers just below the panel (--sticky-top =
+    // panelH), so add the pinned header height; wide mode pins them at 0 (behind
+    // the band, --sticky-top = 0), so they add nothing to the visible band.
+    var hdr     = document.querySelector('.entry-grid .entry-group-hdr');
+    if (!wide && hdr) topGap += hdr.offsetHeight;
+    var GAP  = 8;
+    var rect = btn.getBoundingClientRect();
+    if (rect.top < topGap + GAP) {
+        window.scrollBy({ top: rect.top - topGap - GAP, behavior: 'smooth' });
+    } else if (rect.bottom > window.innerHeight - GAP) {
+        window.scrollBy({ top: rect.bottom - window.innerHeight + GAP, behavior: 'smooth' });
+    }
 }
 
 // ============================================================
@@ -4257,14 +6227,51 @@ function openAbout() {
     _resetSelftestChips();
     var auditOut = document.getElementById('audit-result');
     if (auditOut) { auditOut.textContent = ''; auditOut.style.display = 'none'; }
+    var auditLocked = document.getElementById('audit-locked');
+    if (auditLocked) auditLocked.style.display = 'none';
+    var pkOut = document.getElementById('passkey-result');
+    if (pkOut) { pkOut.textContent = ''; pkOut.style.display = 'none'; }
+    var pkLocked = document.getElementById('passkey-locked');
+    if (pkLocked) pkLocked.style.display = 'none';
+    var trashOut = document.getElementById('trash-result');
+    if (trashOut) { trashOut.textContent = ''; trashOut.style.display = 'none'; }
+    var trashLocked = document.getElementById('trash-locked');
+    if (trashLocked) trashLocked.style.display = 'none';
     document.getElementById('about-overlay').classList.add('open');
+    document.body.classList.add('modal-open');
     var aboutBody = document.getElementById('about-body');
     if (aboutBody) aboutBody.scrollTop = 0;
+    _loadAboutVersion();
+    _loadAboutKdf();
     runCryptoSelfTest();
+}
+
+// Populate the Standards Alignment Argon2 line from the active vault-wide cost
+// (_vaultKdf) so it tracks the Change KDF Parameters flow instead of a baked-in
+// default. The HTML carries the default fallback for the offline/read-only copy.
+function _loadAboutKdf() {
+    var el = document.getElementById('std-argon-params');
+    if (!el) return;
+    var memMiB = Math.round(_vaultKdf.memorySize / 1024);
+    el.innerHTML = 'm&nbsp;=&nbsp;' + memMiB + '&nbsp;MiB, t&nbsp;=&nbsp;' +
+        _vaultKdf.iterations + ', p&nbsp;=&nbsp;' + _vaultKdf.parallelism;
+}
+
+// Populate the About modal's version line from the served PWA manifest so it
+// stays in sync with manifest.json. The HTML carries a baked-in fallback, so the
+// offline/read-only copy (no manifest fetch) still shows a version.
+function _loadAboutVersion() {
+    var el = document.getElementById('about-version');
+    if (!el) return;
+    fetch('manifest.json', { cache: 'no-store' })
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (m) { if (m && m.version) el.textContent = m.version; })
+        .catch(function () { /* keep the baked-in fallback */ });
 }
 
 function closeAbout() {
     document.getElementById('about-overlay').classList.remove('open');
+    document.body.classList.remove('modal-open');
     _hideAboutTip();
 }
 
@@ -4496,8 +6503,9 @@ function _lockAndClearVault() {
     _resetKeyFields();
     _mkCache.clear();
     _terminateArgonPool();
+    resetInactivityTimer();
     clearDisplay();
-    _editRecord = null;
+    _editRecord = null; _editSnapshot = null;
     document.getElementById('newentry').style.display         = 'none';
     document.getElementById('passwordSettings').style.display = 'none';
     document.getElementById('newentry-title').textContent     = 'New Entry';
@@ -4533,21 +6541,51 @@ document.addEventListener('keydown', function(e) {
     window.scrollTo({ top: 0, behavior: 'smooth' });
 });
 
-// Global single-key shortcuts. Suppressed while typing (any input/textarea/select/
-// contenteditable), while a Ctrl/Cmd/Alt modifier is held (so Cmd+N, select-all,
-// etc. stay native; Shift is allowed since '?' needs it), and while the About modal
-// is open (Escape closes it). The search overlay needs no special-case — it keeps
-// focus in #search-input, so the typing guard already bails while it's open.
-function _isShortcutBlocked(e) {
+// Suppressed while typing (any input/textarea/select/contenteditable) or while
+// a Ctrl/Cmd/Alt modifier is held (so Cmd+N, select-all, etc. stay native;
+// Shift is allowed since '?' needs it). Shared by the page shortcuts below and
+// the About-modal-only 'u' shortcut.
+function _isTypingOrModifier(e) {
     if (e.ctrlKey || e.metaKey || e.altKey) return true;
     var t = document.activeElement;
-    if (t && (/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName) || t.isContentEditable)) return true;
+    return !!(t && (/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName) || t.isContentEditable));
+}
+
+// Global single-key shortcuts. Suppressed while typing/modifier (see above) and
+// while the About modal is open (Escape closes it; 'u' and 'a'/'i' are handled
+// separately below so they can reach the modal — 'u' toggles its Disable-auto-lock
+// checkbox, 'a'/'i' close it). The search
+// overlay needs no special-case — it keeps focus in #search-input, so the
+// typing guard already bails while it's open.
+function _isShortcutBlocked(e) {
+    if (_isTypingOrModifier(e)) return true;
     if (document.getElementById('about-overlay').classList.contains('open')) return true;
     return false;
 }
 
 document.addEventListener('keydown', function(e) {
     if (e.key === 'Escape') return;          // handled by the listener above
+    // 'U' toggles About > Auto-lock's Disable-auto-lock checkbox while the
+    // modal is open — one of the few single-key shortcuts reachable there (with
+    // 'a'/'i' below), since _isShortcutBlocked otherwise bails for the whole modal.
+    if (e.key.toLowerCase() === 'u' &&
+        document.getElementById('about-overlay').classList.contains('open')) {
+        if (_isTypingOrModifier(e)) return;
+        e.preventDefault();
+        var alt = document.getElementById('autolock-disable-toggle');
+        if (alt) { alt.checked = !alt.checked; alt.dispatchEvent(new Event('change')); }
+        return;
+    }
+    // 'A'/'I' toggle the About modal — reachable while it's open (unlike the
+    // other shortcuts, which _isShortcutBlocked bails on for the whole modal),
+    // so the same key that opened it also closes it.
+    if ((e.key.toLowerCase() === 'a' || e.key.toLowerCase() === 'i') &&
+        document.getElementById('about-overlay').classList.contains('open')) {
+        if (_isTypingOrModifier(e)) return;
+        e.preventDefault();
+        closeAbout();
+        return;
+    }
     if (_isShortcutBlocked(e)) return;
     switch (e.key === '?' ? '?' : e.key.toLowerCase()) {
         case '?':
@@ -4564,7 +6602,7 @@ document.addEventListener('keydown', function(e) {
             var cb = document.querySelector('[data-action="clear-display"]');
             if (cb) blinkTD(cb);
             clearDisplay();
-            _editRecord = null;
+            _editRecord = null; _editSnapshot = null;
             break;
         }
         case 'x': {
@@ -4593,6 +6631,13 @@ document.addEventListener('keydown', function(e) {
             deleteEntry();
             break;
         }
+        case 'f': {
+            // Toggle favorite on the currently selected (decoded) entry.
+            if (!_decodedFields || !_decodedFields.name) break;
+            e.preventDefault();
+            toggleFavorite();
+            break;
+        }
         case 'i':
         case 'a':
             e.preventDefault();
@@ -4609,8 +6654,9 @@ function performAutoLock() {
     _resetKeyFields();
     _mkCache.clear();
     _terminateArgonPool();
+    resetInactivityTimer();
     clearDisplay();
-    _editRecord = null;
+    _editRecord = null; _editSnapshot = null;
     document.getElementById('newentry').style.display         = 'none';
     document.getElementById('passwordSettings').style.display = 'none';
     document.getElementById('newentry-title').textContent     = 'New Entry';
@@ -4652,6 +6698,7 @@ function cancelAutoLock() {
 function resetInactivityTimer() {
     clearTimeout(_inactivityTimer);
     if (_lockWarnTimer) hideLockWarning();
+    if (_autolockDisabled) return;
     _inactivityTimer = setTimeout(showLockWarning, _INACTIVITY_MS);
 }
 
@@ -4677,6 +6724,19 @@ function resetInactivityTimer() {
 var _clickActions = {
     'edit-entry':        function(el) { editEntry(); },
     'delete-entry':      function(el) { deleteEntry(); },
+    'set-entry-type':    function(el) { _applyEntryType(el.dataset.type); },
+    'toggle-select-mode':function(el) { _toggleSelectMode(); },
+    'bulk-select-all':   function(el) { _bulkSelectAll(); },
+    'bulk-fav':          function(el) { _bulkFav(); },
+    'bulk-tag':          function(el) { _bulkTag(); },
+    'bulk-tag-apply':    function(el) { _bulkTagApply(); },
+    'bulk-tag-cancel':   function(el) { _bulkTagCancel(); },
+    'bulk-delete':       function(el) { _bulkDelete(); },
+    'delete-passkey':    function(el) { deletePasskey(); },
+    'toggle-fav':        function(el) { toggleFavorite(); },
+    'add-extra-field':   function(el) { var i = _addExtraFieldRow('', '', false); if (i) i.focus(); },
+    'open-trash':        function(el) { openTrash(); },
+    'toggle-history':    function(el) { _toggleHistory(); },
     'copy-username':     function(el) { doCBCopy('username'); },
     'copy-2fa':          function(el) { doCBCopy('2fa'); },
     'copy-password':     function(el) { doCBCopy('password'); },
@@ -4684,10 +6744,11 @@ var _clickActions = {
     'toggle-key':        function(el) { toggleKey(); },
     'toggle-key2':       function(el) { toggleKey2(); },
     'clear-lines':       function(el) { clearLines(el); },
-    'clear-display':     function(el) { blinkTD(el); clearDisplay(); _editRecord = null; },
+    'clear-display':     function(el) { blinkTD(el); clearDisplay(); _editRecord = null; _editSnapshot = null; },
     'new-entry':         function(el) { newEntry(el); },
     'toggle-search':     function(el) { toggleSearch(); },
     'open-about':        function(el) { openAbout(); },
+    'toggle-theme':      function(el) { toggleTheme(); },
     'generate':          function(el) { doGenerate(); },
     'scan-qr':           function(el) { scanQRCode(); },
     'show-pw-settings':  function(el) { showPWSettings(); },
@@ -4699,12 +6760,18 @@ var _clickActions = {
     'retest-crypto':     function(el) { retestCrypto(); },
     'export-vault':      function(el) { exportVault(); },
     'import-vault':      function(el) { _importVaultClick(); },
+    'export-csv':        function(el) { exportVaultCSV(); },
+    'import-csv':        function(el) { _importCsvClick(); },
+    'import-keepass':    function(el) { _pickImportFile('.xml,text/xml,application/xml', _importKeepassFile); },
+    'import-1pux':       function(el) { _pickImportFile('.1pux,application/zip,application/octet-stream', _import1puxFile); },
     'audit-vault':       function(el) { auditVault(); },
+    'list-passkeys':     function(el) { listPasskeys(); },
     'toggle-chpw':       function(el) { toggleChangePw(); },
     'toggle-chpw-show':  function(el) { toggleChpwShow(el); },
     'do-chpw':           function(el) { changeMasterPasswords(); },
     'toggle-kdf':        function(el) { toggleChangeKdf(); },
     'do-kdf':            function(el) { changeKdfParams(); },
+    'kdf-calibrate':     function(el) { _kdfCalibrate(); },
     'resign-vault':      function(el) { resignVault(); }
 };
 
@@ -4747,6 +6814,18 @@ function _bindStaticHandlers() {
         notes.style.height = notes.scrollHeight + 'px';
     });
 
+    // Shift+Enter saves the new/edit entry from any field in the form. The Notes
+    // textarea is exempt: there Shift+Enter (and plain Enter) insert a newline as
+    // usual. #newentry is a div, so keydown bubbles up from the child inputs here.
+    var newentry = document.getElementById('newentry');
+    if (newentry) newentry.addEventListener('keydown', function(e) {
+        if (e.target && e.target.id === 'notes') return;   // let Notes keep Shift+Enter as a newline
+        if (e.key === 'Enter' && e.shiftKey) {
+            e.preventDefault();
+            saveEntry();
+        }
+    });
+
     // Change KDF Parameters: the 5-step slider drives the mem/iterations inputs
     // from the preset table; typing in either input snaps the slider to match.
     var kdfSlider = document.getElementById('kdf-slider');
@@ -4784,6 +6863,51 @@ function _bindStaticHandlers() {
         }
     });
 
+    // Group-by-first-letter toggle: reflect the stored pref, then re-sort the
+    // grid (re-emitting or stripping headers) whenever it changes.
+    _loadGroupPref();
+    var gt = document.getElementById('group-toggle');
+    if (gt) {
+        gt.checked = _groupEntries;
+        gt.addEventListener('change', function() {
+            _groupEntries = gt.checked;
+            _saveGroupPref();
+            _sortEntryGrid();
+        });
+    }
+
+    // Disable-auto-lock toggle (About > Auto-lock): persisted per-instance in
+    // localStorage — fully sticky, surviving both reloads and vault locks.
+    // Turning it ON (whether via the checkbox or by loading a page that finds
+    // it already on) requires the same explicit confirmation, since it leaves
+    // the vault unlocked indefinitely; cancelling reverts to enabled (and
+    // persists that) without further changes.
+    var _autolockConfirmMsg =
+        'Disabling auto-lock means this vault will stay unlocked indefinitely ' +
+        'while this tab is open, even if you walk away from your device.\n\n' +
+        'Are you sure you want to turn off auto-lock?';
+    _loadAutolockPref();
+    if (_autolockDisabled && !window.confirm(_autolockConfirmMsg)) {
+        _autolockDisabled = false;
+    }
+    _saveAutolockPref();
+    var alt = document.getElementById('autolock-disable-toggle');
+    if (alt) {
+        alt.checked = _autolockDisabled;
+        alt.addEventListener('change', function() {
+            if (alt.checked && !window.confirm(_autolockConfirmMsg)) {
+                alt.checked = false;
+                return;
+            }
+            _autolockDisabled = alt.checked;
+            _saveAutolockPref();
+            _updateAutolockStatus();
+            resetInactivityTimer();
+        });
+    }
+    _updateAutolockStatus();
+    resetInactivityTimer();
+
     var form = document.querySelector('form.ctrl-form');
     if (form) form.addEventListener('submit', function(e) { e.preventDefault(); });
 
@@ -4805,6 +6929,7 @@ function _bindStaticHandlers() {
 // Reveal v5 entry names when both passwords are set and the user tabs away from
 // the secondary key.  Either field changing invalidates previously revealed names.
 document.addEventListener('DOMContentLoaded', function() {
+    _loadTheme();
     _bindStaticHandlers();
 
     // (_updateVaultKeyBar is bound to both key fields' `input` in
@@ -4859,7 +6984,19 @@ document.addEventListener('DOMContentLoaded', function() {
     _manifest = (mEl && mEl.dataset.manifest) ? mEl.dataset.manifest : null;
     window.scrollTo(0, 0);
     document.getElementById('aeskey').focus();
+    _initServiceWorker();
 });
+
+// Register the service worker (faster repeat loads of the heavy code assets +
+// installable-PWA offline fallback). Secure-context only; failures are silent
+// so a blocked/old browser just runs without it. The SW never caches the vault
+// document — see sw.js.
+function _initServiceWorker() {
+    if (!('serviceWorker' in navigator) || !window.isSecureContext) return;
+    window.addEventListener('load', function() {
+        navigator.serviceWorker.register('sw.js').catch(function() {});
+    });
+}
 
 // ============================================================
 // Delete an entry
@@ -4868,11 +7005,19 @@ document.addEventListener('DOMContentLoaded', function() {
 function deleteEntry() {
     if (deleteEntryRecord === null) { alert('Select an entry to delete first'); return; }
     if (confirm('Delete "' + deleteEntryName + '"?')) {
-        _xhrPost('delete_rec=' + encodeURIComponent(deleteEntryRecord))
+        // Capture before clearDisplay() nulls them, so Undo can re-insert the record.
+        var rec = deleteEntryRecord;
+        var nm  = deleteEntryName;
+        _xhrPost('delete_rec=' + encodeURIComponent(rec))
             .then(function(text) {
                 try { if (_applyServerResponse(text)) _revealCachedV5Buttons(); } catch (_) { location.reload(); return; }
                 _signAfterWrite();
                 clearDisplay();
+                showToast('Deleted "' + nm + '"', {
+                    actionLabel: 'Undo',
+                    duration: 7000,
+                    onAction: function() { _undoDelete(rec, nm); }
+                });
             })
             .catch(function(e) {
                 if (e.stale) {
@@ -4882,6 +7027,257 @@ function deleteEntry() {
                 }
                 alert('Delete failed: ' + e.message);
             });
+    }
+}
+
+// Re-insert a just-deleted record. A plain data= add can't 409 (only
+// delete/bulk/sign send expect_hash), so undo is always safe. Mirrors the
+// post-save path: cache the name for instant reveal, then re-sign.
+function _undoDelete(record, name) {
+    _v5Names.set(record, name);
+    _xhrPost('data=' + encodeURIComponent(record))
+        .then(function(text) {
+            try { if (_applyServerResponse(text)) _revealCachedV5Buttons(); } catch (_) { location.reload(); return; }
+            _signAfterWrite();
+            showToast('Restored "' + name + '"');
+        })
+        .catch(function(e) { alert('Undo failed: ' + e.message); });
+}
+
+// ============================================================
+// Multi-select / bulk operations (delete · tag · favorite)
+// ============================================================
+// A grid-wide selection mode: while active, clicking an entry toggles its
+// selection instead of decoding it, and the bulk-action bar applies one action
+// to all selected entries at once. Selection is purely in-DOM (the .entry-selected
+// class) — it is cleared whenever the grid rebuilds, the vault locks, or the mode
+// is exited, so it never outlives the unlocked session.
+var _selectMode = false;
+
+// Central entry-button click handler: select-toggle in select mode, else decode.
+function _onEntryClick(btn, row) {
+    if (_selectMode) { _toggleSelect(btn); return; }
+    if (btn === _selectedBtn) { clearDisplay(); } else { decodeLine(btn, row); }
+}
+
+function _selectedButtons() {
+    return Array.from(document.querySelectorAll('.entry-grid .entry-btn.entry-selected'));
+}
+function _clearSelection() {
+    document.querySelectorAll('.entry-btn.entry-selected').forEach(function(b) {
+        b.classList.remove('entry-selected');
+    });
+}
+function _toggleSelect(btn) {
+    btn.classList.toggle('entry-selected');
+    _updateBulkBar();
+}
+function _updateBulkBar() {
+    var el = document.getElementById('bulk-count');
+    if (el) {
+        var n = _selectedButtons().length;
+        el.textContent = n + ' selected';
+    }
+}
+function _hideBulkTagRow() {
+    var row = document.getElementById('bulk-tag-row');
+    if (row) row.style.display = 'none';
+}
+
+function _toggleSelectMode() {
+    if (_selectMode) { _exitSelectMode(); return; }
+    // Only meaningful with at least one revealed (decryptable) entry.
+    if (!document.querySelector('.entry-grid .entry-btn:not(.v5-locked)')) {
+        showToast('Unlock the vault to select entries'); return;
+    }
+    _selectMode = true;
+    hideSearch();
+    clearDisplay();
+    var grid = document.querySelector('.entry-grid');
+    if (grid) grid.classList.add('select-mode');
+    var tgl = document.getElementById('select-toggle');
+    if (tgl) { tgl.classList.add('is-on'); tgl.textContent = '☑︎ Selecting'; }
+    var bar = document.getElementById('bulk-bar');
+    if (bar) bar.style.display = '';
+    _hideBulkTagRow();
+    _updateBulkBar();
+}
+function _exitSelectMode() {
+    if (!_selectMode) return;
+    _selectMode = false;
+    _clearSelection();
+    var grid = document.querySelector('.entry-grid');
+    if (grid) grid.classList.remove('select-mode');
+    var tgl = document.getElementById('select-toggle');
+    if (tgl) { tgl.classList.remove('is-on'); tgl.textContent = '☑︎ Select'; }
+    var bar = document.getElementById('bulk-bar');
+    if (bar) bar.style.display = 'none';
+    _hideBulkTagRow();
+}
+
+// Toggle-select every visible (revealed, not search-hidden) entry.
+function _bulkSelectAll() {
+    var vis = Array.from(document.querySelectorAll('.entry-grid .entry-btn:not(.v5-locked)'))
+                   .filter(function(b) { return b.style.display !== 'none'; });
+    var allSel = vis.length && vis.every(function(b) { return b.classList.contains('entry-selected'); });
+    vis.forEach(function(b) { b.classList.toggle('entry-selected', !allSel); });
+    _updateBulkBar();
+}
+
+// Bulk favorite: pure localStorage, no crypto/network. Toggles — if every selected
+// entry is already a favorite, remove them all; otherwise add them all.
+function _bulkFav() {
+    var btns = _selectedButtons();
+    if (!btns.length) { showToast('Select entries first'); return; }
+    var set = _favs();
+    var allFav = btns.every(function(b) { return set.has(_favHash(_btnName(b))); });
+    btns.forEach(function(b) {
+        var h = _favHash(_btnName(b));
+        if (allFav) set.delete(h); else set.add(h);
+    });
+    _saveFavs();
+    _markFavButtons();
+    _sortEntryGrid();
+    showToast(allFav ? 'Removed ' + btns.length + ' from favorites'
+                     : '★ Added ' + btns.length + ' to favorites');
+}
+
+// Canonical record (trailing line index stripped) for each selected button.
+function _selectedRecords() {
+    return _selectedButtons().map(function(b) {
+        return b.dataset.row.split('|').slice(0, -1).join('|');
+    });
+}
+// SHA-256 (hex) over the current vault's canonical records joined with "\n" —
+// the expect_hash a bulk/restore write checks for a concurrent modification.
+async function _currentVaultHash() {
+    var current = _allEntries.map(function(row) {
+        return row.split('|').slice(0, -1).join('|');
+    });
+    var buf = await crypto.subtle.digest('SHA-256', _TE.encode(current.join('\n')));
+    return { records: current, hash: bytesToHex(new Uint8Array(buf)) };
+}
+
+// Bulk delete: commit the surviving records in one count-flexible `restore` write
+// (atomic, single re-sign, pre-write bak/ backup — see Write Protocol). Offers an
+// Undo that restores the pre-delete record set the same way.
+async function _bulkDelete() {
+    var keys = _selectedRecords();
+    if (!keys.length) { showToast('Select entries first'); return; }
+    // A `restore` write can't empty the vault (post.php rejects an empty payload),
+    // so deleting every entry at once is refused — leave at least one, or delete
+    // the final entry individually.
+    if (keys.length >= _allEntries.length) {
+        showToast('Can’t delete every entry at once — leave at least one selected off');
+        return;
+    }
+    if (!confirm('Delete ' + keys.length + ' selected '
+                 + (keys.length === 1 ? 'entry' : 'entries') + '?')) return;
+    var drop = {};
+    keys.forEach(function(k) { drop[k] = true; });
+    try {
+        var snap = await _currentVaultHash();
+        var remaining = snap.records.filter(function(r) { return !drop[r]; });
+        var responseText = await _xhrPost('restore=1&expect_hash=' + snap.hash
+                              + '&bulk_data=' + encodeURIComponent(remaining.join('\n')));
+        _exitSelectMode();
+        clearDisplay();
+        try { if (_applyServerResponse(responseText)) _revealCachedV5Buttons(); }
+        catch (_) { location.reload(); return; }
+        _signAfterWrite();
+        var n = keys.length;
+        showToast('Deleted ' + n + ' ' + (n === 1 ? 'entry' : 'entries'), {
+            actionLabel: 'Undo', duration: 8000,
+            onAction: function() { _bulkRestoreSet(snap.records); }
+        });
+    } catch (e) {
+        if (e.stale) {
+            showToast('Vault changed elsewhere — reloading');
+            setTimeout(function() { location.reload(); }, 1200);
+            return;
+        }
+        showToast('Bulk delete failed — ' + e.message);
+    }
+}
+
+// Restore a previously-captured record set (Undo for bulk delete). The deleted
+// records' names are still in _v5Names (never cleared on delete), so they reveal
+// instantly. Mirrors the restore-write tail used by Import / Restore.
+async function _bulkRestoreSet(records) {
+    try {
+        var snap = await _currentVaultHash();
+        var responseText = await _xhrPost('restore=1&expect_hash=' + snap.hash
+                              + '&bulk_data=' + encodeURIComponent(records.join('\n')));
+        try { if (_applyServerResponse(responseText)) _revealCachedV5Buttons(); }
+        catch (_) { location.reload(); return; }
+        _signAfterWrite();
+        showToast('Restored ' + records.length + ' ' + (records.length === 1 ? 'entry' : 'entries'));
+    } catch (e) {
+        showToast('Undo failed — ' + e.message);
+    }
+}
+
+// Bulk tag: reveal the tag-input row (the actual write runs from _bulkTagApply).
+function _bulkTag() {
+    if (!_selectedButtons().length) { showToast('Select entries first'); return; }
+    if (!_isVaultUnlocked()) { showToast('Unlock the vault first'); return; }
+    var row = document.getElementById('bulk-tag-row');
+    if (row) row.style.display = '';
+    var inp = document.getElementById('bulk-tag-input');
+    if (inp) { inp.value = ''; inp.focus(); }
+}
+function _bulkTagCancel() { _hideBulkTagRow(); }
+
+// Add the typed tag(s) to every selected entry: decrypt each, merge the tags,
+// re-encrypt with fresh salts/nonces, and commit the unchanged + re-encrypted
+// records in one count-flexible `restore` write. All-or-nothing — any decrypt
+// failure aborts before anything is sent.
+async function _bulkTagApply() {
+    var keys = _selectedRecords();
+    if (!keys.length) { showToast('Select entries first'); return; }
+    var addTags = _normalizeTags(document.getElementById('bulk-tag-input').value);
+    if (!addTags) { showToast('Enter at least one tag'); return; }
+    var pw  = document.getElementById('aeskey').value;
+    var pw2 = document.getElementById('aeskey2').value;
+    if (!_isVaultUnlocked()) { showToast('Unlock the vault first'); return; }
+
+    try {
+        var pairs = await _forEachRecordDecrypt(pw, pw2, async function(rec, name, fields) {
+            fields.tags = _normalizeTags((fields.tags || '') + ',' + addTags);
+            var s1 = crypto.getRandomValues(new Uint8Array(32));
+            var s2 = crypto.getRandomValues(new Uint8Array(32));
+            var ne = await encryptName(pw, pw2, s1, s2, name);
+            var rf = await encryptFields(pw, pw2, s1, s2, fields);
+            var newRec = _assembleRecord(ne, rf, s1, s2);
+            return { old: rec, newRec: newRec, name: name, fields: fields };
+        }, null, keys);
+
+        var changed = {};
+        pairs.forEach(function(p) { changed[p.old] = p.newRec; });
+        var snap   = await _currentVaultHash();
+        var merged = snap.records.map(function(r) { return changed[r] || r; });
+        var responseText = await _xhrPost('restore=1&expect_hash=' + snap.hash
+                              + '&bulk_data=' + encodeURIComponent(merged.join('\n')));
+
+        // Seed the name + @-search caches for the re-encrypted records so the
+        // rebuilt grid reveals them instantly (passwords unchanged → _mkCache kept).
+        pairs.forEach(function(p) {
+            _v5Names.set(p.newRec, p.name);
+            _searchText.set(p.newRec, _searchIndex(p.fields));
+        });
+        _exitSelectMode();
+        clearDisplay();
+        try { if (_applyServerResponse(responseText)) _revealCachedV5Buttons(); }
+        catch (_) { location.reload(); return; }
+        _signAfterWrite();
+        showToast('Tagged ' + pairs.length + ' ' + (pairs.length === 1 ? 'entry' : 'entries'));
+    } catch (e) {
+        if (e.stale) {
+            showToast('Vault changed elsewhere — reloading');
+            setTimeout(function() { location.reload(); }, 1200);
+            return;
+        }
+        showToast('Bulk tag failed — ' + e.message);
     }
 }
 

@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="stylesheet" href="popup.css" />
+    <title>Vault</title>
+  </head>
+  <body>
+    <header>
+      <span class="title">🔒 Vault Autofill</span>
+      <span class="header-actions">
+        <button id="about-btn" class="ghost" title="About" aria-label="About">&#x2139;&#xFE0E;</button>
+        <button id="edit-btn" class="ghost" title="Open the vault in a new tab to add or edit entries">Edit</button>
+        <button id="refresh-btn" class="ghost" hidden title="Re-read the vault and re-decrypt">Refresh</button>
+        <span id="autolock-off" class="autolock-off" hidden title="Auto-lock is disabled — the vault stays unlocked until you lock it manually" aria-label="Auto-lock disabled">&#x23F1;&#xFE0E;</span>
+        <button id="lock-btn" class="ghost" hidden title="Lock">Lock</button>
+      </span>
+    </header>
+
+    <!-- Unlock view -->
+    <section id="unlock-view">
+      <label>Vault URL
+        <input id="vault-url" type="url" placeholder="https://host/pass/&lt;instance&gt;/" autocomplete="off" />
+      </label>
+      <label>Primary password
+        <span class="pw-wrap">
+          <input id="pw1" type="password" autocomplete="off" />
+          <button type="button" class="eye" data-target="pw1" title="Show/hide" aria-label="Show or hide password">👁</button>
+        </span>
+      </label>
+      <label>Secondary password
+        <span class="pw-wrap">
+          <input id="pw2" type="password" autocomplete="off" />
+          <button type="button" class="eye" data-target="pw2" title="Show/hide" aria-label="Show or hide password">👁</button>
+        </span>
+      </label>
+      <button id="unlock-btn" class="accent">Unlock</button>
+      <p id="unlock-status" class="status"></p>
+      <div id="unlock-progress" class="progress" hidden>
+        <div class="progress-track">
+          <div id="progress-fill" class="progress-fill"></div>
+          <span id="progress-key" class="progress-key">🔑</span>
+        </div>
+        <span id="progress-pct" class="progress-pct">0%</span>
+      </div>
+    </section>
+
+    <!-- Entries view -->
+    <section id="entries-view" hidden>
+      <input id="filter" type="search" placeholder="Filter entries…" autocomplete="off" />
+      <p id="meta" class="meta"></p>
+      <ul id="entries"></ul>
+    </section>
+
+    <!-- About modal -->
+    <div id="about-overlay" class="overlay" hidden>
+      <div class="modal" role="dialog" aria-label="About">
+        <div class="modal-head">
+          <span class="modal-title">&#x1F512;&#xFE0E; Vault Autofill Companion</span>
+          <button id="about-close" class="ghost" title="Close" aria-label="Close">&#x2715;</button>
+        </div>
+        <div class="modal-body">
+          <div class="about-section">
+            <h3>&#x2139;&#xFE0E; Description</h3>
+            <p>
+              A companion for your self-hosted, client-side-encrypted vault. It reads the same
+              ciphertext the vault already serves and decrypts it <strong>locally in the browser</strong>,
+              then autofills logins on matching sites. Read-only &mdash; use the vault web app
+              (<em>Edit</em>) to add or change entries.  Passwords are <strong>never stored</strong> &mdash; 
+              only the vault URL is saved. Decrypted secrets live only in memory and are wiped on lock / 5-min idle. 
+              The only network request is fetching your vault; nothing is sent elsewhere.          
+            </p>
+          </div>
+          
+          <div class="about-section">
+            <h3>&#x23F2;&#xFE0E; Auto-Lock</h3>
+            <label class="chk"><input type="checkbox" id="disable-autolock" /> Disable auto-lock</label>
+            <p class="dim">
+              When enabled, the vault locks after 5 minutes of true system inactivity (or when the
+              screen locks). Disabling keeps decrypted secrets in memory until you lock manually or
+              close the browser.
+            </p>
+          </div>          
+
+          <div class="about-section">
+            <h3>&#x26D3;&#xFE0E; Encryption Pipeline</h3>
+            <p>
+              Identical to the vault's v6 scheme. Two memory-hard <code>Argon2id</code> master keys per
+              record (one per password) are HKDF-SHA-256 expanded into per-cipher subkeys. Payloads are
+              wrapped in a four-cipher cascade; entry names in two layers. Both passwords are required.
+            </p>
+          </div>
+
+          <div class="about-section">
+            <h3>&#x1F6E1;&#xFE0E; Ciphers</h3>
+            <table class="cr-table">
+              <tr><td class="cr-name"><code>ChaCha20-Poly1305</code></td><td class="cr-tag"><span class="cr-aead">AEAD</span></td></tr>
+              <tr><td class="cr-name"><code>AES-256-GCM</code></td><td class="cr-tag"><span class="cr-aead">AEAD</span></td></tr>
+              <tr><td class="cr-name"><code>Twofish-256</code></td><td class="cr-tag"><span class="cr-ctr">CTR</span></td></tr>
+              <tr><td class="cr-name"><code>Serpent-256</code></td><td class="cr-tag"><span class="cr-ctr">CTR</span></td></tr>
+              <tr><td class="cr-name"><code>Argon2id</code></td><td class="cr-tag"><span class="cr-ctr">KDF</span></td></tr>
+            </table>
+            <p class="dim">The crypto runs the vault's exact code (a verbatim slice of its <code>javascript.js</code>), parallelised across an Argon2id Web Worker pool.</p>
+          </div>
+
+          <p class="dim" style="text-align:center; margin-top:14px;">Version <span id="about-version"></span></p>
+
+        </div>
+      </div>
+    </div>
+
+    <script src="popup.js"></script>
+  </body>
+</html>

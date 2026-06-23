@@ -1,0 +1,28 @@
+# --- Runtime vault data (never publish a populated vault) ---
+# `lines` and `index.html` ship as an empty starter vault. On a live
+# deployment, uncomment the next two lines to keep your ciphertext out of git:
+# lines
+# index.html
+trash
+manifest
+kdfparams
+# Ignore vault backups but keep the directory's access-control guard.
+bak/*
+!bak/.htaccess
+
+# --- Offline re-encryption tooling working files (ciphertext) ---
+moved/lines.*
+moved/javascript.params-old.js
+
+# --- Extension build artifacts & signing keys (NEVER commit) ---
+*.pem
+*.crx
+*.zip
+*.xpi
+web-ext-artifacts/
+
+# --- Tooling / local ---
+node_modules/
+.claude/
+*.log
+.DS_Store
