@@ -21,7 +21,7 @@ No accounts, no cloud, no database server, no runtime dependencies fetched from 
 
 ## Overview
 
-The vault is a single page served by any PHP-capable web server. Unlocking it takes **two independent master passwords** — both are required to decrypt anything; either one alone reveals nothing, not even entry names.
+The vault is a single page served by any PHP-capable web server — or by the bundled, dependency-free Node server ([`server.js`](#running-without-php-standalone-node-server)), with no PHP required. Unlocking it takes **two independent master passwords** — both are required to decrypt anything; either one alone reveals nothing, not even entry names.
 
 **At a glance:**
 
@@ -90,6 +90,8 @@ To test locally with no web server installed:
 ```bash
 php -S localhost:8080
 ```
+
+Prefer not to install PHP at all? The bundled [Node server](#running-without-php-standalone-node-server) runs the same vault with `node server.js` — see that section for the (very short) setup.
 
 ---
 
@@ -355,7 +357,7 @@ Hover any button or interactive field for a brief description of what it does.
 
 - **Backups before every write:** the current database is copied to `bak/` (timestamped to the microsecond, so rapid writes can't collide) before any modification; a failed backup aborts the write. Backups are pruned on every write — first dropping any older than 60 days, then keeping only the newest 100 (oldest removed first). Both limits default sensibly and can be overridden per-deployment via the `VAULT_BAK_KEEP` and `VAULT_BAK_MAX_AGE_DAYS` environment variables (`0` disables that limit); all three write clients — `post.php`, `server.js`, and the TUI — honor them.
 - **Soft delete:** deleted records are moved to a `trash` file (ciphertext only, like the database) rather than discarded, so they can be restored from *Vault Tools → Trash*. Trash is pruned to the newest 100 entries and entries younger than 30 days on every change. All trash writes happen under the same exclusive lock as the database.
-- **Exclusive locking:** the entire read-modify-write — including the `index.html` rebuild — holds an exclusive `flock` on the database, so overlapping saves cannot lose each other's changes.
+- **Exclusive locking:** the entire read-modify-write — including the `index.html` rebuild — holds an exclusive `flock` on the database (the single-process Node server runs the same critical section synchronously instead, which is equivalent), so overlapping saves cannot lose each other's changes.
 - **Content-addressed writes:** deletes and edits identify the record by its full ciphertext string (unique per record thanks to random salts), never by line position. A stale reference is refused with HTTP `409` and nothing is modified.
 - **Atomic password rotation:** the bulk replace used by *Change Passwords* sends a hash of the exact snapshot that was re-encrypted; the server verifies it under the lock and refuses (`409`, untouched) if the vault changed in between.
 - **Clear failure modes:** the UI distinguishes wrong write-credentials (401), rate-limit lockout (429, with the wait time), stale records (409), and blocked origins (403).
@@ -365,8 +367,8 @@ Hover any button or interactive field for a brief description of what it does.
 ## Security notes
 
 - **All encryption and decryption happens in your browser.** The server never sees your master keys or plaintext.
-- **Writes require a separate login.** `post.php` is protected by HTTP Basic Auth (`VAULT_AUTH_USER` / `VAULT_AUTH_PASS` at the top of the file — set your own; the shipped values are placeholders). Your browser prompts the first time you save in a session. Only meaningful over HTTPS.
-- **Write logins are rate-limited.** After 5 failed Basic-Auth attempts from one IP within 15 minutes, further attempts get `429` until the window clears. Blocked attempts don't extend the lockout; a success clears the history. The limiter fails open if its temp-dir state can't be written, so a misconfiguration can't lock you out of your own server.
+- **Writes require a separate login.** Writes are protected by HTTP Basic Auth — `VAULT_AUTH_USER` / `VAULT_AUTH_PASS`, set at the top of `post.php` (or, for the Node server's `web` mode, supplied as environment variables). Set your own; the shipped values are placeholders. Your browser prompts the first time you save in a session. Only meaningful over HTTPS.
+- **Write logins are rate-limited.** After 5 failed Basic-Auth attempts from one IP within 15 minutes, further attempts get `429` until the window clears. Blocked attempts don't extend the lockout; a success clears the history. Under PHP the per-IP window is tracked in a temp-dir file and the limiter **fails open** if that state can't be written, so a misconfiguration can't lock you out of your own server; the Node server's `web` mode keeps the same window in memory.
 - **Wrong keys fail hard.** The AEAD layers authenticate the ciphertext — there is no partial or garbled decryption.
 - **The database leaks nothing.** Entries are ciphertext in a flat text file; names are encrypted too. Read access to the file (or the `trash` file, which holds deleted entries in the same form) is useless without both master passwords.
 - **Browser storage stays metadata-free.** The only per-vault state kept in the browser is UI preferences (the Group A–Z toggle, the integrity revision high-water mark) and the favorites set — and favorites are stored as a one-way hash of each entry name, never the name itself, so reading local storage reveals nothing about your entries.
