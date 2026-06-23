@@ -4,6 +4,10 @@ A self-hosted, zero-knowledge password manager that runs entirely in your browse
 
 No accounts, no cloud, no database server, no runtime dependencies fetched from a CDN. One directory, one flat file, and your choice of backend — a single PHP script or the bundled dependency-free Node server ([`server.js`](#running-without-php-standalone-node-server)). [MIT-licensed](LICENSE).
 
+
+Full disclosure: This originally started a simple custom built/hacked together AES vault that the author used for years.  
+Then Claude was used to audit the code and slowly expand it.  
+
 ---
 
 ## Screen Shots
