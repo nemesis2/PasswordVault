@@ -95,6 +95,3 @@ cat moved/argon2_bundle.js moved/argon2_worker_tail.js > argon2-worker.js
 `./verify-bundles.sh` automates rebuilding and diffing these against what's
 committed. See [CLAUDE.md](CLAUDE.md) → *Inlined Cipher Bundles* for details.
 
-## Roadmap
-
-Open ideas and their status are tracked in [suggestions.md](suggestions.md).
