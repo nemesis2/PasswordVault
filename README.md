@@ -2,7 +2,7 @@
 
 A self-hosted, zero-knowledge password manager that runs entirely in your browser. Every entry — including its **name** — is encrypted on your device with a four-cipher cascade and a memory-hard key-derivation function before it is sent anywhere. The server stores and serves ciphertext only; it never sees a master key or a single plaintext byte.
 
-No accounts, no cloud, no JavaScript framework, no database server, no runtime dependencies fetched from a CDN. One directory, one flat file, one PHP script. [MIT-licensed](LICENSE).
+No accounts, no cloud, no database server, no runtime dependencies fetched from a CDN. One directory, one flat file, and your choice of backend — a single PHP script or the bundled dependency-free Node server ([`server.js`](#running-without-php-standalone-node-server)). [MIT-licensed](LICENSE).
 
 ---
 
