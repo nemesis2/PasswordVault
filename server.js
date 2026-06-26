@@ -26,7 +26,7 @@
 // Module: require('./server.js') exposes the internals for the parity test.
 // =============================================================================
 
-const VERSION = '1.1.3';
+const VERSION = '1.1.4';
 
 const http    = require('http');
 const fs      = require('fs');

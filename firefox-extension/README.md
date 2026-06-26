@@ -106,6 +106,16 @@ require. `npm run sign` (channel `unlisted`) returns a Mozilla-signed `.xpi` in
 `web-ext-artifacts/` that installs permanently and self-updates if you host an
 update manifest; `sign:listed` puts it through AMO review for the public store.
 
+`manifest.json` deliberately omits `data_collection_permissions` — that key needs
+Firefox 140 to parse, which conflicts with this extension's `strict_min_version: 91.0`
+(the linter warns if both are set). The extension collects no data either way; when
+running `sign:listed`, declare that via the **Data collection** section of the AMO
+Developer Hub listing form instead of the manifest.
+
+(`strict_min_version` was briefly bumped to `142.0` to add the key directly, then
+reverted back to `91.0` — broad version support wins over silencing the linter's
+notice, which is informational only and not required yet.)
+
 > **Chrome/Edge:** a Manifest V3 port exists in [`../chrome-extension`](../chrome-extension)
 > (`action` instead of `browser_action`, the `scripting` API instead of
 > `tabs.executeScript`, and a persistent offscreen document hosting the session +

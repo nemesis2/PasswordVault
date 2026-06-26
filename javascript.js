@@ -1684,7 +1684,8 @@ var _v5Names = new Map();
 // saveEntry) and cleared alongside _v5Names on lock. Lets #/@ search match tags or
 // notes vault-wide without re-decrypting, since reveal-all already derives every
 // record's keys.
-var _searchText = new Map();
+var _searchText  = new Map();
+var _entryBadges = new Map(); // rowKey → { passkey: bool, note: bool }
 
 // Build the { tags, notes, extra } lowercased search-index entry from a decrypted
 // payload. `extra` flattens every custom field's label + value so a "!" search
@@ -2807,7 +2808,7 @@ async function _decodeQRFromFile(file) {
         showToast(cfg.steam ? 'Steam Guard secret scanned ✓' : 'TOTP secret scanned ✓');
 
     } catch (e) {
-        showToast('QR scan error: ' + e.message);
+        showToast('QR scan failed — ' + e.message);
     }
 }
 
@@ -3022,7 +3023,7 @@ function setNotes(text) {
     }
     resizeFreezePane();
     var delta = content.getBoundingClientRect().top - oldTop;
-    if (delta) window.scrollBy(0, delta);
+    if (delta) window.scrollBy({ top: delta, behavior: 'instant' });
 }
 
 // Show/hide the decode-panel Tags row. Like setNotes, toggling it changes the
@@ -3055,7 +3056,7 @@ function _setDecTags(text) {
     row.style.display = tags.length ? '' : 'none';
     resizeFreezePane();
     var delta = content.getBoundingClientRect().top - oldTop;
-    if (delta) window.scrollBy(0, delta);
+    if (delta) window.scrollBy({ top: delta, behavior: 'instant' });
 }
 
 // Open the search popup pre-filled with a tag-scoped query (#tag) and run it.
@@ -3308,7 +3309,10 @@ function _renderDecExtras() {
             hiRow.style.display = 'none';
         }
     }
+    var _content = document.getElementById('content');
+    var _oldTop  = _content ? _content.getBoundingClientRect().top : 0;
     resizeFreezePane();
+    if (_content) { var _d = _content.getBoundingClientRect().top - _oldTop; if (_d) window.scrollBy({ top: _d, behavior: 'instant' }); }
 }
 function _toggleHistory() {
     var box = document.getElementById('dechistory');
@@ -3339,7 +3343,10 @@ function _renderDecPasskey() {
         val.textContent = '';
         row.style.display = 'none';
     }
+    var _content = document.getElementById('content');
+    var _oldTop  = _content ? _content.getBoundingClientRect().top : 0;
     resizeFreezePane();
+    if (_content) { var _d = _content.getBoundingClientRect().top - _oldTop; if (_d) window.scrollBy({ top: _d, behavior: 'instant' }); }
 }
 
 // Delete a stored passkey: strip the passkey sub-object and re-save the entry so
@@ -3614,6 +3621,8 @@ function _rebuildEntryGrid(entries) {
             var cached = _v5Names.get(rowKey);
             if (cached !== undefined) {
                 _setEntryName(btn, cached);
+                var _b = _entryBadges.get(rowKey);
+                if (_b) { _markPasskeyButton(btn, _b.passkey); _markNoteButton(btn, _b.note); }
             } else {
                 btn.classList.add('v5-locked');
                 btn.style.display = 'none';
@@ -3677,6 +3686,8 @@ function _applyServerResponse(text) {
 // v6: encNameHEX|v6|recSalt1HEX|recSalt2HEX|nameNonce1HEX|nameNonce2HEX|iv1HEX|nonce2HEX|nonce3HEX|nonce4HEX|encHEX|lineIndex
 async function decodeLine(passedTD, encryptedData) {
     blinkTD(passedTD);
+    var _dc = document.getElementById('content');
+    var _dt = _dc ? _dc.getBoundingClientRect().top : null;
     clearDisplay();
 
     _selectBtn(passedTD);
@@ -3756,6 +3767,8 @@ async function decodeLine(passedTD, encryptedData) {
             _searchText.set(rowKey, _searchIndex(fields));
 
             var entryType = (fields.type === 'note') ? 'note' : 'login';
+            var _hasPk = !!(fields.passkey && fields.passkey.rpId);
+            _entryBadges.set(rowKey, { passkey: _hasPk, note: entryType === 'note' });
             _decodedFields = {
                 name:       name,
                 type:       entryType,
@@ -3772,12 +3785,18 @@ async function decodeLine(passedTD, encryptedData) {
                 passkey:    (fields.passkey && typeof fields.passkey === 'object') ? fields.passkey : null
             };
             _applyDecType(entryType);
+            _markPasskeyButton(passedTD, _hasPk);
             _markNoteButton(passedTD, entryType === 'note');
             _setDecModified();
             _renderDecExtras();
             _renderDecPasskey();
             _updateFavBtn();
             _markFavButtons();
+            // Final drift correction: individual per-function compensations
+            // may accumulate sub-pixel errors or be partially offset by
+            // async browser scroll-anchoring adjustments. One last comparison
+            // against the pre-decode position corrects any residual shift.
+            if (_dt !== null && _dc) { var _df = _dc.getBoundingClientRect().top - _dt; if (_df) window.scrollBy({ top: _df, behavior: 'instant' }); }
 
         } catch (_) {
             document.getElementById('decname').textContent = 'Wrong key or corrupted entry';
@@ -3809,6 +3828,7 @@ function _relockV5Entries() {
     _lastRevealPw2 = null;
     _v5Names.clear();
     _searchText.clear();
+    _entryBadges.clear();
     _clearVaultTools();
     _setIntegrityBadge(null);
     document.querySelectorAll('.entry-grid .entry-btn').forEach(function(btn) {
@@ -3836,6 +3856,8 @@ function _revealCachedV5Buttons() {
             _setEntryName(btn, cached);
             btn.classList.remove('v5-locked');
             btn.style.display = '';
+            var _b = _entryBadges.get(rowKey);
+            if (_b) { _markPasskeyButton(btn, _b.passkey); _markNoteButton(btn, _b.note); }
         }
     });
     _sortEntryGrid();
@@ -3902,9 +3924,12 @@ function _applyDecType(type) {
     var note = type === 'note';
     var u = document.getElementById('decrow-user');
     var p = document.getElementById('decrow-pw');
+    var _content = document.getElementById('content');
+    var _oldTop  = _content ? _content.getBoundingClientRect().top : 0;
     if (u) u.style.display = note ? 'none' : '';
     if (p) p.style.display = note ? 'none' : '';
     resizeFreezePane();
+    if (_content) { var _d = _content.getBoundingClientRect().top - _oldTop; if (_d) window.scrollBy({ top: _d, behavior: 'instant' }); }
 }
 // Plain name of an entry button for sorting/grouping (avatar-aware).
 function _btnName(btn) {
@@ -4030,10 +4055,12 @@ async function _revealAllV5Names(pw, pw2) {
                 var f = await decryptFields(pw, pw2, parts[2], parts[3], parts[6], parts[7], parts[8], parts[9], parts[10]);
                 if (gen !== _revealGen) return false;
                 _searchText.set(rowKey, _searchIndex(f));
+                var _pk = !!(f.passkey && f.passkey.rpId), _nt = f.type === 'note';
+                _entryBadges.set(rowKey, { passkey: _pk, note: _nt });
                 // Flag passkey / secure-note entries in the grid (payload already
                 // decrypted here, so the badge costs no extra Argon2id).
-                _markPasskeyButton(btn, !!(f.passkey && f.passkey.rpId));
-                _markNoteButton(btn, f.type === 'note');
+                _markPasskeyButton(btn, _pk);
+                _markNoteButton(btn, _nt);
             } catch (_) {
                 if (gen !== _revealGen) return false;
                 /* wrong key / corrupt — leave unindexed */
@@ -4202,13 +4229,26 @@ async function saveEntry() {
         // seed the @-search index (the record is already decrypted here).
         _v5Names.set(record, v.name);
         _searchText.set(record, _searchIndex(fields));
+        _entryBadges.set(record, { passkey: !!(fields.passkey && fields.passkey.rpId), note: fields.type === 'note' });
         var responseText = await _postEntry(record);
+        var wasEditing = _editRecord !== null;
         _editRecord = null; _editSnapshot = null;
         try {
             if (_applyServerResponse(responseText)) _revealCachedV5Buttons();
         } catch (_) { location.reload(); return; }
         _signAfterWrite();
         _resetEntryForm();
+        if (wasEditing) {
+            var savedBtn = Array.from(document.querySelectorAll('.entry-grid .entry-btn')).find(function(b) {
+                return b.dataset.row && b.dataset.row.split('|').slice(0, -1).join('|') === record;
+            });
+            if (savedBtn) {
+                requestAnimationFrame(async function() {
+                    await decodeLine(savedBtn, savedBtn.dataset.row);
+                    _scrollGridBtnIntoView(savedBtn);
+                });
+            }
+        }
     } catch (e) {
         if (e.stale) {
             showToast('Entry was changed elsewhere — reloading');
@@ -4438,7 +4478,7 @@ var _CSV_COLS = ['name', 'url', 'username', 'password', 'totp', 'notes', 'tags',
 // Download every entry as a PLAINTEXT CSV. Gated behind _isVaultUnlocked()
 // (so the passwords are known-correct) and a hard warning + confirm, because
 // the output has none of the vault's protection.
-async function exportVaultCSV() {
+async function exportVaultCSV(btn) {
     if (!_isVaultUnlocked()) {
         showToast('Enter both passwords and unlock the vault first.');
         return;
@@ -4446,7 +4486,7 @@ async function exportVaultCSV() {
     if (!_allEntries.length) { showToast('Nothing to export'); return; }
 
     if (!window.confirm(
-            '⚠︎  Export UNENCRYPTED CSV?\n\n'
+            '⚠︎ Export UNENCRYPTED CSV?\n\n'
           + 'This writes every entry — passwords, TOTP secrets, and notes — to '
           + 'a plain-text file with NO encryption and NONE of this vault’s '
           + 'protection. Anyone who can read the file sees everything.\n\n'
@@ -4462,6 +4502,7 @@ async function exportVaultCSV() {
     function say(msg) { if (out) { out.style.display = ''; out.textContent = msg; } }
 
     say('Decrypting all entries… 0 / ' + _allEntries.length);
+    if (btn) btn.disabled = true;
     var rows;
     try {
         rows = await _forEachRecordDecrypt(pw, pw2, function(rec, name, fields) {
@@ -4480,6 +4521,8 @@ async function exportVaultCSV() {
     } catch (e) {
         say('CSV export failed — ' + e.message);
         return;
+    } finally {
+        if (btn) btn.disabled = false;
     }
 
     var lines = [_CSV_COLS.join(',')];
@@ -4993,7 +5036,7 @@ async function _forEachRecordDecrypt(pw, pw2, handler, progressCb, rowsIn) {
 
 // Decrypt all payloads locally and flag reused / weak / fair / empty passwords.
 // Renders entry names only — never the passwords themselves. No network I/O.
-async function auditVault() {
+async function auditVault(btn) {
     var pw  = document.getElementById('aeskey').value;
     var pw2 = document.getElementById('aeskey2').value;
     var out    = document.getElementById('audit-result');
@@ -5009,6 +5052,7 @@ async function auditVault() {
     if (!_allEntries.length) { out.textContent = 'Vault is empty.'; return; }
 
     out.textContent = 'Auditing… 0 / ' + _allEntries.length;
+    if (btn) btn.disabled = true;
     var items;
     try {
         items = await _forEachRecordDecrypt(pw, pw2, function(rec, name, fields) {
@@ -5025,6 +5069,8 @@ async function auditVault() {
     } catch (e) {
         out.textContent = 'Audit failed — ' + e.message;
         return;
+    } finally {
+        if (btn) btn.disabled = false;
     }
 
     var byPassword = new Map();
@@ -5060,11 +5106,11 @@ async function auditVault() {
         return;
     }
     reused.forEach(function(names) {
-        addLine('⚠ Same password on ' + names.length + ' entries: '
+        addLine('⚠︎ Same password on ' + names.length + ' entries: '
                 + names.join(', '), 'audit-bad');
     });
-    if (weak.length)  addLine('⚠ Weak (under 40 bits): ' + weak.join(', '), 'audit-warn');
-    if (fair.length)  addLine('⚠ Fair (40–80 bits): ' + fair.join(', '), 'audit-warn');
+    if (weak.length)  addLine('⚠︎ Weak (under 40 bits): ' + weak.join(', '), 'audit-warn');
+    if (fair.length)  addLine('⚠︎ Fair (40–80 bits): ' + fair.join(', '), 'audit-warn');
     if (empty.length) addLine('— No password stored: ' + empty.join(', '), 'audit-warn');
     if (old.length)   addLine('⏱ Not changed in over a year: ' + old.join(', '), 'audit-warn');
 }
@@ -5074,7 +5120,7 @@ async function auditVault() {
 // any key material). Mirrors auditVault()'s locked-check + _forEachRecordDecrypt
 // pattern. The PWA only views/deletes passkeys; creation + signing live in the
 // browser extensions.
-async function listPasskeys() {
+async function listPasskeys(btn) {
     var pw  = document.getElementById('aeskey').value;
     var pw2 = document.getElementById('aeskey2').value;
     var out    = document.getElementById('passkey-result');
@@ -5090,6 +5136,7 @@ async function listPasskeys() {
     if (!_allEntries.length) { out.textContent = 'Vault is empty.'; return; }
 
     out.textContent = 'Scanning… 0 / ' + _allEntries.length;
+    if (btn) btn.disabled = true;
     var items;
     try {
         items = await _forEachRecordDecrypt(pw, pw2, function(rec, name, fields) {
@@ -5102,6 +5149,8 @@ async function listPasskeys() {
     } catch (e) {
         out.textContent = 'Passkey scan failed — ' + e.message;
         return;
+    } finally {
+        if (btn) btn.disabled = false;
     }
 
     var found = items.filter(function(it) { return it; });
@@ -5545,7 +5594,7 @@ async function _kdfCalibrate() {
         say('Suggested: ' + memMiB + ' MiB, ' + iters + ' iter (~' + est + ' ms per derivation here). '
             + 'Adjust memory and re-Calibrate, then Re-encrypt.');
     } catch (e) {
-        say('Calibration failed: ' + (e && e.message ? e.message : e));
+        say('Calibration failed — ' + (e && e.message ? e.message : e));
     } finally {
         if (btn) btn.disabled = false;
     }
@@ -5793,7 +5842,7 @@ async function _verifyManifest(pw, pw2) {
             _setIntegrityBadge('vi-fail', '✖ Manifest missing (this device last saw rev ' + stored + ')');
             showToast('Vault integrity manifest is missing!');
         } else {
-            _setIntegrityBadge('vi-warn', '⚠ Vault not signed yet — use Sign in About → Vault Tools');
+            _setIntegrityBadge('vi-warn', '⚠︎ Vault not signed yet — use Sign in About → Vault Tools');
         }
         return;
     }
@@ -5862,10 +5911,10 @@ async function _signAfterWrite() {
                 if (_applyServerResponse(text)) _revealCachedV5Buttons();
                 await _signVault(pw, pw2);
             } catch (_) {
-                _setIntegrityBadge('vi-warn', '⚠ Vault changed elsewhere — not signed (unlock again to re-check)');
+                _setIntegrityBadge('vi-warn', '⚠︎ Vault changed elsewhere — not signed (unlock again to re-check)');
             }
         } else {
-            _setIntegrityBadge('vi-warn', '⚠ Sign failed — ' + e.message);
+            _setIntegrityBadge('vi-warn', '⚠︎ Sign failed — ' + e.message);
         }
     } finally {
         _signPending = false;
@@ -5909,11 +5958,225 @@ function showSearch() {
     var inp = document.getElementById('search-input');
     inp.value = '';
     filterSearch('');
+    _palAfterRender();
     inp.focus();
 }
 
 function hideSearch() {
     document.getElementById('search-overlay').classList.remove('open');
+}
+
+// ── Command-palette additions (Ctrl-K) ──────────────────────────────
+// The search overlay doubles as a command palette: fuzzy entry search +
+// keyboard navigation + copy/edit chords + a ">" command mode. All of it
+// reuses the existing decode/copy/edit paths — no new crypto.
+
+// Subsequence fuzzy matcher → {hit, score} (higher score = better). A
+// contiguous substring scores highest; otherwise every query char must
+// appear in order, with bonuses for consecutive runs and word-boundary
+// starts. Empty query matches everything (score 0).
+function _fuzzyMatch(query, text) {
+    var q = (query || '').toLowerCase();
+    var t = (text  || '').toLowerCase();
+    if (!q) return { hit: true, score: 0 };
+    var sub = t.indexOf(q);
+    if (sub !== -1) {
+        var b = sub === 0 || /[^a-z0-9]/.test(t.charAt(sub - 1));
+        return { hit: true, score: 10000 - sub + (b ? 500 : 0) };
+    }
+    var ti = 0, score = 0, prev = -2;
+    for (var qi = 0; qi < q.length; qi++) {
+        var c = q.charAt(qi);
+        while (ti < t.length && t.charAt(ti) !== c) ti++;
+        if (ti >= t.length) return { hit: false, score: 0 };
+        if (ti === prev + 1) score += 8;                                   // consecutive
+        if (ti === 0 || /[^a-z0-9]/.test(t.charAt(ti - 1))) score += 6;    // word boundary
+        score += Math.max(0, 4 - ti / 8);                                  // earlier is better
+        prev = ti;
+        ti++;
+    }
+    return { hit: true, score: score };
+}
+
+// Global actions for ">" command mode. Each wires to an existing function /
+// _clickActions handler. needUnlock entries are disabled while locked.
+// Open the About modal, optionally run an action and scroll the relevant
+// section into view inside #about-body. openAbout() resets the body to the top
+// and an action's output renders into a section far down the modal, so without
+// this the user lands on the modal header and sees nothing happen. Deferred to
+// a double rAF so the open animation + layout (and openAbout's own scrollTop=0)
+// settle before we scroll. openAbout() also focuses #about-body so the keyboard
+// scrolls the modal — its focus runs first (preventScroll), then this scroll.
+function _palAbout(targetId, fn) {
+    openAbout();
+    if (fn) fn();
+    requestAnimationFrame(function() {
+        requestAnimationFrame(function() {
+            var el = targetId && document.getElementById(targetId);
+            if (el) el.scrollIntoView({ block: 'start', behavior: 'smooth' });
+        });
+    });
+}
+
+var _PALETTE_COMMANDS = [
+    { label: 'New entry',                 hint: 'N', needUnlock: true, run: function() { var b = document.querySelector('[data-action="new-entry"]'); if (b && !b.disabled) newEntry(b); } },
+    { label: 'Lock vault',                hint: 'X', run: function() { _lockAndClearVault(); } },
+    { label: 'Toggle Group A–Z',          needUnlock: true, run: function() { var gt = document.getElementById('group-toggle'); if (gt) { gt.checked = !gt.checked; gt.dispatchEvent(new Event('change')); } } },
+    { label: 'Toggle theme',              run: function() { toggleTheme(); } },
+    { label: 'Toggle auto-lock',          run: function() { _palAbout('autolock-disable-toggle', function() { var alt = document.getElementById('autolock-disable-toggle'); if (alt) { alt.checked = !alt.checked; alt.dispatchEvent(new Event('change')); } }); } },
+    { label: 'Export vault (.lines)',     needUnlock: true, run: function() { exportVault(); } },
+    { label: 'Export CSV',                needUnlock: true, run: function() { exportVaultCSV(); } },
+    { label: 'Import / Restore (.lines)', needUnlock: true, run: function() { _importVaultClick(); } },
+    { label: 'Import CSV',                needUnlock: true, run: function() { _importCsvClick(); } },
+    { label: 'Import KeePass (XML)',      needUnlock: true, run: function() { _pickImportFile('.xml,text/xml,application/xml', _importKeepassFile); } },
+    { label: 'Import 1Password (.1pux)',  needUnlock: true, run: function() { _pickImportFile('.1pux,application/zip,application/octet-stream', _import1puxFile); } },
+    { label: 'Audit passwords',           needUnlock: true, run: function() { _palAbout('audit-result', auditVault); } },
+    { label: 'Passkeys',                  needUnlock: true, run: function() { _palAbout('passkey-result', listPasskeys); } },
+    { label: 'Trash',                     needUnlock: true, run: function() { _palAbout('trash-result', openTrash); } },
+    { label: 'Change passwords',          needUnlock: true, run: function() { _palAbout('chpw-form', toggleChangePw); } },
+    { label: 'Change KDF parameters',     needUnlock: true, run: function() { _palAbout('about-kdf', toggleChangeKdf); } },
+    { label: 'Sign vault',                needUnlock: true, run: function() { resignVault(); } },
+    { label: 'Run crypto self-test',      run: function() { _palAbout('about-selftest', retestCrypto); } },
+    { label: 'About',                     hint: 'A', run: function() { _palAbout(); } }
+];
+
+var _palItems = [];   // [{el, type:'entry'|'cmd', row?, cmd?}] — selectable rows, DOM order
+var _palIndex = -1;   // active row in _palItems, or -1
+
+function _palSyncHint(mode) {
+    var el = document.getElementById('search-hint');
+    if (!el) return;
+    el.textContent = mode === 'command'
+        ? '↑↓ navigate · ↵ run · esc close'
+        : '↑↓ navigate · ↵ open · ⌘/^C copy pw · ⌘/^U user · ⌘/^E edit · > commands';
+}
+
+// Rebuild _palItems from whatever filterSearch just rendered (decouples
+// keyboard nav from filterSearch's internals; called after every render).
+function _palReindex() {
+    _palItems = [];
+    _palIndex = -1;
+    var results = document.getElementById('search-results');
+    if (!results) return;
+    results.querySelectorAll('.entry-btn').forEach(function(b) {
+        if (b.classList.contains('pal-disabled')) return;
+        if (b.dataset.palRow !== undefined) _palItems.push({ el: b, type: 'entry', row: b.dataset.palRow });
+        else if (b.dataset.palCmd !== undefined) _palItems.push({ el: b, type: 'cmd', cmd: _PALETTE_COMMANDS[+b.dataset.palCmd] });
+    });
+}
+
+function _palSetActive(i) {
+    if (_palIndex >= 0 && _palItems[_palIndex]) _palItems[_palIndex].el.classList.remove('pal-active');
+    if (!_palItems.length) { _palIndex = -1; return; }
+    if (i < 0) i = 0;
+    if (i >= _palItems.length) i = _palItems.length - 1;
+    _palIndex = i;
+    var it = _palItems[_palIndex];
+    it.el.classList.add('pal-active');
+    it.el.scrollIntoView({ block: 'nearest' });
+}
+
+function _palMove(delta) {
+    if (!_palItems.length) return;
+    _palSetActive((_palIndex < 0 ? 0 : _palIndex + delta));
+}
+
+// Enter: just click the active row — entries reuse their existing onclick
+// (decode + jump + scroll), commands reuse theirs (hideSearch + run).
+function _palActivate() {
+    if (_palIndex < 0 || !_palItems[_palIndex]) return;
+    _palItems[_palIndex].el.click();
+}
+
+// ⌘/Ctrl chord on the active entry: decode it (reusing the search-result
+// decode path), then copy a field / open edit.
+function _palChord(action) {
+    if (_palIndex < 0 || !_palItems[_palIndex]) return;
+    var it = _palItems[_palIndex];
+    if (it.type !== 'entry') return;
+    _palEntryAction(it.row, action);
+}
+
+function _palEntryAction(row, action) {
+    var gridBtn = _findGridBtn(row);
+    hideSearch();
+    Promise.resolve(decodeLine(gridBtn, row)).then(function() {
+        if (action === 'edit') editEntry();
+        else doCBCopy(action);   // 'password' | 'username'
+    });
+}
+
+// Called after every filterSearch() render to refresh the hint bar and the
+// keyboard-nav index + initial highlight.
+function _palAfterRender() {
+    var si = document.getElementById('search-input');
+    var cmd = !!si && si.value.trim().charAt(0) === '>';
+    _palSyncHint(cmd ? 'command' : 'entry');
+    _palReindex();
+    _palSetActive(0);
+}
+
+// ">" command mode: fuzzy-filter _PALETTE_COMMANDS into the results list.
+function _renderCommandResults(q) {
+    var results = document.getElementById('search-results');
+    var countEl = document.getElementById('search-count');
+    var unlocked = _isVaultUnlocked();
+    var scored = [];
+    _PALETTE_COMMANDS.forEach(function(cmd, i) {
+        var m = _fuzzyMatch(q, cmd.label);
+        if (m.hit) scored.push({ cmd: cmd, i: i, score: m.score });
+    });
+    scored.sort(function(a, b) {
+        if (b.score !== a.score) return b.score - a.score;
+        return a.cmd.label.localeCompare(b.cmd.label);
+    });
+    if (countEl) {
+        countEl.textContent = '';
+        var scopeEl = document.createElement('span');
+        scopeEl.className   = 'search-scope';
+        scopeEl.textContent = 'Commands';
+        var countTxt = document.createElement('span');
+        countTxt.textContent = scored.length + (scored.length === 1 ? ' command' : ' commands');
+        countEl.appendChild(scopeEl);
+        countEl.appendChild(countTxt);
+    }
+    if (!scored.length) {
+        var msg = document.createElement('div');
+        msg.id = 'search-no-match';
+        msg.textContent = 'No commands';
+        results.appendChild(msg);
+        return;
+    }
+    scored.forEach(function(s) {
+        var cmd = s.cmd;
+        var disabled = !!cmd.needUnlock && !unlocked;
+        var btn = document.createElement('button');
+        btn.className = 'entry-btn pal-cmd';
+        btn.title     = cmd.label;
+        var gl = document.createElement('span');
+        gl.className   = 'entry-avatar pal-cmd-glyph';
+        gl.textContent = '›';
+        gl.setAttribute('aria-hidden', 'true');
+        btn.appendChild(gl);
+        var lbl = document.createElement('span');
+        lbl.className   = 'entry-btn-lbl';
+        lbl.textContent = cmd.label;
+        btn.appendChild(lbl);
+        if (cmd.hint) {
+            var h = document.createElement('span');
+            h.className   = 'pal-cmd-hint';
+            h.textContent = cmd.hint;
+            btn.appendChild(h);
+        }
+        if (disabled) {
+            btn.classList.add('pal-disabled');
+            btn.disabled = true;
+        } else {
+            btn.dataset.palCmd = s.i;
+            btn.onclick = function() { hideSearch(); cmd.run(); };
+        }
+        results.appendChild(btn);
+    });
 }
 
 function filterSearch(query) {
@@ -5925,6 +6188,8 @@ function filterSearch(query) {
     // the entry name as before.
     var raw   = query.trim();
     var first = raw.charAt(0);
+    // ">" → command mode (global actions); handled entirely by _renderCommandResults.
+    if (first === '>') { _renderCommandResults(raw.slice(1).trim().toLowerCase()); return; }
     var mode  = first === '#' ? 'tags'
               : first === '@' ? 'notes'
               : first === '!' ? 'extra'
@@ -5937,14 +6202,20 @@ function filterSearch(query) {
     var total   = _allEntries.length;
     var matched = _allEntries.filter(function(row) {
         var key = row.split('|').slice(0, -1).join('|');
-        if (mode === 'name') return (_v5Names.get(key) || '').toLowerCase().indexOf(q) !== -1;
+        // Name search is fuzzy (subsequence); scoped searches stay substring.
+        if (mode === 'name') return _fuzzyMatch(q, _v5Names.get(key) || '').hit;
         var idx = _searchText.get(key);
         return !!idx && (idx[mode] || '').indexOf(q) !== -1;
     });
-    // Show results alphabetically by display name (locked 🔒 entries sink last).
+    // Name mode: rank by fuzzy score (best first), display name as tiebreak.
+    // Scoped modes: alphabetical by display name (locked 🔒 entries sink last).
     matched.sort(function(a, b) {
         var na = (_v5Names.get(a.split('|').slice(0, -1).join('|')) || '￿');
         var nb = (_v5Names.get(b.split('|').slice(0, -1).join('|')) || '￿');
+        if (mode === 'name') {
+            var sa = _fuzzyMatch(q, na).score, sb = _fuzzyMatch(q, nb).score;
+            if (sb !== sa) return sb - sa;
+        }
         return na.localeCompare(nb, undefined, { sensitivity: 'base' });
     });
     if (countEl) {
@@ -5974,7 +6245,9 @@ function filterSearch(query) {
     matched.forEach(function(row) {
         var parts = row.split('|');
         var displayName = _v5Names.get(parts.slice(0, -1).join('|')) || '🔒';
-        if (_groupEntries && displayName !== '🔒') {
+        // Group headers only make sense in alphabetical order; fuzzy name mode
+        // is ranked by score, so skip them there (scoped modes stay grouped).
+        if (_groupEntries && mode !== 'name' && displayName !== '🔒') {
             var key = _entryGroupKey(displayName);
             if (key !== curKey) {
                 curKey = key;
@@ -5988,6 +6261,7 @@ function filterSearch(query) {
         var btn = document.createElement('button');
         btn.className   = 'entry-btn';
         btn.title       = displayName;
+        btn.dataset.palRow = row;   // keyboard-nav handle (see _palReindex)
         if (displayName !== '🔒') {
             var sav = document.createElement('span');
             sav.className   = 'entry-avatar';
@@ -6107,7 +6381,7 @@ async function runCryptoSelfTest() {
         el.classList.remove('loading', 'ok', 'fail');
         if (ok === null) { el.classList.add('loading'); el.textContent = '…'; return; }
         el.classList.add(ok ? 'ok' : 'fail');
-        el.textContent = ok ? '✓' : '⚠';
+        el.textContent = ok ? '✓' : '⚠︎';
         if (!ok && msg) el.title = msg;
     }
 
@@ -6192,7 +6466,7 @@ async function runCryptoSelfTest() {
             banner.textContent = '✓ Self-test passed — all ' + pass + ' checks OK · ' + stamp;
         } else {
             banner.classList.add('fail');
-            banner.textContent = '⚠ Self-test: ' + fail + ' of ' + (pass + fail) +
+            banner.textContent = '⚠︎ Self-test: ' + fail + ' of ' + (pass + fail) +
                                  ' check' + (fail === 1 ? '' : 's') + ' failed · ' + stamp;
         }
     }
@@ -6244,6 +6518,16 @@ function openAbout() {
     _loadAboutVersion();
     _loadAboutKdf();
     runCryptoSelfTest();
+    // Land the keyboard inside the modal so arrow keys / PageUp-Down / Home-End
+    // scroll it. #about-body has tabindex="-1"; defer so the open animation +
+    // the scrollTop=0 above settle first, and preventScroll so focusing doesn't
+    // fight a scroll position a caller (e.g. _palAbout) set in the same frame.
+    requestAnimationFrame(function() {
+        requestAnimationFrame(function() {
+            var b = document.getElementById('about-body');
+            if (b) b.focus({ preventScroll: true });
+        });
+    });
 }
 
 // Populate the Standards Alignment Argon2 line from the active vault-wide cost
@@ -6565,6 +6849,25 @@ function _isShortcutBlocked(e) {
 
 document.addEventListener('keydown', function(e) {
     if (e.key === 'Escape') return;          // handled by the listener above
+    // Ctrl/⌘-K opens (or closes) the command palette. Placed above the typing /
+    // _isShortcutBlocked guards so it fires even from inside an input, and it is
+    // intentionally reachable while the About modal is open — the palette renders
+    // above About (see #search-overlay z-index) so it isn't buried.
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        toggleSearch();
+        return;
+    }
+    // '?' opens the palette too, and like Ctrl-K it stays reachable while About
+    // is open (so it's special-cased here, ahead of the _isShortcutBlocked gate
+    // that otherwise suppresses every single-key shortcut for the whole modal).
+    // The typing guard still applies, mirroring the 'a'/'i'/'u' special-cases.
+    if (e.key === '?') {
+        if (_isTypingOrModifier(e)) return;
+        e.preventDefault();
+        toggleSearch();
+        return;
+    }
     // 'U' toggles About > Auto-lock's Disable-auto-lock checkbox while the
     // modal is open — one of the few single-key shortcuts reachable there (with
     // 'a'/'i' below), since _isShortcutBlocked otherwise bails for the whole modal.
@@ -6587,11 +6890,7 @@ document.addEventListener('keydown', function(e) {
         return;
     }
     if (_isShortcutBlocked(e)) return;
-    switch (e.key === '?' ? '?' : e.key.toLowerCase()) {
-        case '?':
-            e.preventDefault();
-            toggleSearch();
-            break;
+    switch (e.key.toLowerCase()) {
         case 'n': {
             var nb = document.querySelector('[data-action="new-entry"]');
             if (nb && !nb.disabled) { e.preventDefault(); newEntry(nb); }
@@ -6760,12 +7059,12 @@ var _clickActions = {
     'retest-crypto':     function(el) { retestCrypto(); },
     'export-vault':      function(el) { exportVault(); },
     'import-vault':      function(el) { _importVaultClick(); },
-    'export-csv':        function(el) { exportVaultCSV(); },
+    'export-csv':        function(el) { exportVaultCSV(el); },
     'import-csv':        function(el) { _importCsvClick(); },
     'import-keepass':    function(el) { _pickImportFile('.xml,text/xml,application/xml', _importKeepassFile); },
     'import-1pux':       function(el) { _pickImportFile('.1pux,application/zip,application/octet-stream', _import1puxFile); },
-    'audit-vault':       function(el) { auditVault(); },
-    'list-passkeys':     function(el) { listPasskeys(); },
+    'audit-vault':       function(el) { auditVault(el); },
+    'list-passkeys':     function(el) { listPasskeys(el); },
     'toggle-chpw':       function(el) { toggleChangePw(); },
     'toggle-chpw-show':  function(el) { toggleChpwShow(el); },
     'do-chpw':           function(el) { changeMasterPasswords(); },
@@ -6913,9 +7212,19 @@ function _bindStaticHandlers() {
 
     var si = document.getElementById('search-input');
     if (si) {
-        si.addEventListener('input', function() { filterSearch(si.value); });
+        si.addEventListener('input', function() { filterSearch(si.value); _palAfterRender(); });
         si.addEventListener('keydown', function(e) {
-            if (e.key === 'Escape') { hideSearch(); e.stopPropagation(); }
+            if (e.key === 'Escape')    { hideSearch(); e.stopPropagation(); return; }
+            if (e.key === 'ArrowDown') { e.preventDefault(); _palMove(1);  return; }
+            if (e.key === 'ArrowUp')   { e.preventDefault(); _palMove(-1); return; }
+            if (e.key === 'Enter')     { e.preventDefault(); _palActivate(); return; }
+            // ⌘/Ctrl chords act on the active entry (copy pw / user, edit).
+            if ((e.ctrlKey || e.metaKey) && !e.altKey) {
+                var k = e.key.toLowerCase();
+                if (k === 'c') { e.preventDefault(); _palChord('password'); return; }
+                if (k === 'u') { e.preventDefault(); _palChord('username'); return; }
+                if (k === 'e') { e.preventDefault(); _palChord('edit');     return; }
+            }
         });
     }
 
@@ -7025,7 +7334,7 @@ function deleteEntry() {
                     setTimeout(function() { location.reload(); }, 1200);
                     return;
                 }
-                alert('Delete failed: ' + e.message);
+                alert('Delete failed — ' + e.message);
             });
     }
 }
@@ -7041,7 +7350,7 @@ function _undoDelete(record, name) {
             _signAfterWrite();
             showToast('Restored "' + name + '"');
         })
-        .catch(function(e) { alert('Undo failed: ' + e.message); });
+        .catch(function(e) { alert('Undo failed — ' + e.message); });
 }
 
 // ============================================================
@@ -7264,6 +7573,7 @@ async function _bulkTagApply() {
         pairs.forEach(function(p) {
             _v5Names.set(p.newRec, p.name);
             _searchText.set(p.newRec, _searchIndex(p.fields));
+            _entryBadges.set(p.newRec, { passkey: !!(p.fields.passkey && p.fields.passkey.rpId), note: p.fields.type === 'note' });
         });
         _exitSelectMode();
         clearDisplay();
@@ -7361,6 +7671,6 @@ function initCrypto() {
     if (typeof crypto !== 'undefined' && crypto.getRandomValues && crypto.subtle) {
         el.textContent = '✓';
     } else {
-        el.textContent = '⚠ NOT available — do not use this browser for password generation';
+        el.textContent = '⚠︎ NOT available — do not use this browser for password generation';
     }
 }

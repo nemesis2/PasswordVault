@@ -44,7 +44,7 @@
           <input class="finput" type="text" id="password" aria-label="Entry password" autocomplete="new-password" autocorrect="off" autocapitalize="none"/>
           <div id="pw-gen-btns">
             <button class="btn-sm" data-action="generate" data-tip="Generate a random password">Generate</button>
-            <button class="btn-sm" id="copy-button" data-action="copy-current" disabled data-tip="Copy to clipboard">&#x1F4CB;&#xFE0E;</button>
+            <button class="btn-sm" id="copy-button" data-action="copy-current" disabled aria-label="Copy generated password" data-tip="Copy to clipboard">&#x1F4CB;&#xFE0E;</button>
           </div>
         </div>
         <div id="pw-strength-wrap" class="pw-strength-wrap" style="display:none">
@@ -131,9 +131,10 @@
 <!-- Search overlay -->
 <div id="search-overlay">
   <div id="search-box">
-    <input type="text" id="search-input" placeholder="Search names…  or #tag  @note  !field" aria-label="Search entries by name, #tag, @note, or !custom field" autocomplete="off"/>
+    <input type="text" id="search-input" placeholder="Search…  #tag  @note  !field  &gt;command" aria-label="Search entries by name, #tag, @note, !custom field, or >command" autocomplete="off"/>
     <div id="search-count"></div>
     <div id="search-results"></div>
+    <div id="search-hint"></div>
   </div>
 </div>
 
@@ -166,13 +167,13 @@
       <h2>&#x2139;&#xFE0E;&nbsp; About Password Vault</h2>
       <button id="about-close" data-action="close-about" aria-label="Close">&times;</button>
     </div>
-    <div id="about-body">
+    <div id="about-body" tabindex="-1">
 
       <div class="about-section">
         <h3>&#x2139;&#xFE0E; Description</h3>
         <p>Self-hosted, client-side encrypted password manager served by a <strong>PHP-capable web server</strong> — or, with no PHP at all, by the bundled standalone <strong>Node.js server</strong> (<code>server.js</code>). All encryption and decryption happens entirely in your browser using the <strong>WebCrypto API</strong> — the server only stores and serves ciphertext and never sees your plaintext passwords.</p>
         <p style="margin-top:4px">Open source, released under the <a href="https://opensource.org/license/mit" target="_blank" rel="noopener">MIT License</a>.</p>
-        <p style="margin-top:4px; color:var(--text-2); font-size:.85em;">Version <span id="about-version">1.1.3</span></p>
+        <p style="margin-top:4px; color:var(--text-2); font-size:.85em;">Version <a id="about-version" href="https://github.com/nemesis2/PasswordVault" target="_blank" rel="noopener">1.1.4</a></p>
       </div>
 
       <div class="about-section" id="about-vault-tools">
@@ -337,10 +338,10 @@
       
       <div class="about-section" id="about-shortcuts">
         <h3>&#x2328;&#xFE0E; Keyboard Shortcuts</h3>
-        <p>Single-key shortcuts work whenever you are not typing in a field. <kbd>Shift</kbd>&#x202F;<kbd>Enter</kbd> works inside the entry form.</p>
+        <p>Single-key shortcuts work whenever you are not typing in a field. <kbd>Shift</kbd>&#x202F;<kbd>Enter</kbd> works inside the entry form, and <kbd>Ctrl</kbd>&#x202F;<kbd>K</kbd> works from anywhere (even while typing).</p>
         <table class="ks-table">
           <tr><td class="ks-key"><kbd>Shift</kbd> <kbd>Enter</kbd></td><td class="ks-desc">Save the entry being added or edited (from any field in the form &mdash; except <strong>Notes</strong>, where it inserts a newline)</td></tr>
-          <tr><td class="ks-key"><kbd>?</kbd></td><td class="ks-desc">Open / close search</td></tr>
+          <tr><td class="ks-key"><kbd>Ctrl</kbd> <kbd>K</kbd> / <kbd>?</kbd></td><td class="ks-desc">Open / close the command palette &mdash; fuzzy search, jump, copy, edit, and <code>&gt;</code> commands (see <em>Command palette</em> below)</td></tr>
           <tr><td class="ks-key"><kbd>N</kbd></td><td class="ks-desc">New entry (when the &#xff0b; New button is enabled)</td></tr>
           <tr><td class="ks-key"><kbd>E</kbd></td><td class="ks-desc">Edit the selected entry (when one is displayed)</td></tr>
           <tr><td class="ks-key"><kbd>Shift</kbd> <kbd>D</kbd></td><td class="ks-desc">Delete the selected entry, with confirmation (when one is displayed)</td></tr>
@@ -357,7 +358,9 @@
       <div class="about-section" id="about-organizing">
         <h3>&#x1F3F7;&#xFE0E; Organizing &amp; Searching</h3>
         <p><strong>Tags.</strong> Each entry can carry a comma-separated list of tags (e.g. <code>work, email, personal</code>). Tags are normalized on save &mdash; lowercased, trimmed, and de-duplicated &mdash; and are stored <strong>inside the encrypted payload</strong>, exactly like the password and notes, so they are as protected as any other field and never appear in the database in the clear.</p>
-        <p style="margin-top:6px"><strong>Scoped search.</strong> The search overlay matches by a leading character: type plainly to search entry <strong>names</strong>, prefix with <code>#</code> to search <strong>tags</strong> (e.g. <code>#work</code>), <code>@</code> to search <strong>notes</strong> (e.g. <code>@recovery</code>), or <code>!</code> to search <strong>custom fields</strong> &mdash; both labels and values (e.g. <code>!PIN</code>). The count line shows which scope is active. Tag, note, and custom-field search read the decrypted payloads cached in memory, so they cover every entry once both passwords are entered and all names have been revealed.</p>
+        <p style="margin-top:6px"><strong>Command palette.</strong> Press <kbd>Ctrl</kbd>&#x202F;<kbd>K</kbd> (or <kbd>?</kbd>, or the &#x1F50D;&#xFE0E; toolbar button) to open the palette. Type to <strong>fuzzy-find</strong> entries by name, navigate the results with <kbd>&uarr;</kbd>&#x202F;<kbd>&darr;</kbd>, and press <kbd>Enter</kbd> to open the highlighted entry. With an entry highlighted you can act on it without leaving the keyboard: <kbd>Ctrl</kbd>&#x202F;<kbd>C</kbd> copies its password, <kbd>Ctrl</kbd>&#x202F;<kbd>U</kbd> copies its username, and <kbd>Ctrl</kbd>&#x202F;<kbd>E</kbd> opens it for editing (use <kbd>&#x2318;</kbd> in place of <kbd>Ctrl</kbd> on a Mac). The hint bar along the bottom of the palette is a reminder of these.</p>
+        <p style="margin-top:6px"><strong>Command mode.</strong> Type a leading <code>&gt;</code> to switch the palette into command mode &mdash; a fuzzy-filtered list of vault actions (New entry, Lock, Export / Import, Audit, Passkeys, Trash, Change passwords / KDF, Toggle theme, and more). Actions that need the vault open are dimmed until both passwords are entered, and those that live in the About panel open it scrolled to the right section.</p>
+        <p style="margin-top:6px"><strong>Scoped search.</strong> Within the palette, the leading character chooses what to match: type plainly to fuzzy-match entry <strong>names</strong>, prefix with <code>#</code> to search <strong>tags</strong> (e.g. <code>#work</code>), <code>@</code> to search <strong>notes</strong> (e.g. <code>@recovery</code>), or <code>!</code> to search <strong>custom fields</strong> &mdash; both labels and values (e.g. <code>!PIN</code>). The count line shows which scope is active. Tag, note, and custom-field search read the decrypted payloads cached in memory, so they cover every entry once both passwords are entered and all names have been revealed.</p>
         <p style="margin-top:6px"><strong>Group A&ndash;Z.</strong> The entry grid is always sorted alphabetically; the <strong>Group A&ndash;Z</strong> toggle (beside the entry count, once the vault is unlocked) adds sticky first-letter headers above each run of entries &mdash; names not starting with a letter are bucketed under <code>#</code>. The preference is remembered per vault in your browser (on by default).</p>
         <p style="margin-top:6px"><strong>Favorites.</strong> Click the &#x2606; star in the display panel (or press <kbd>F</kbd>) to favorite the open entry. Favorites pin to the top of the grid &mdash; under a <strong>&#x2605; Favorites</strong> header when grouping is on &mdash; and show a &#x2605; on their button. The set is remembered per vault in your browser as a <strong>one-way hash of each name</strong> (never the name itself), so it survives edits and reveals nothing if local storage is read.</p>
         <p style="margin-top:6px"><strong>Custom fields.</strong> Entries can carry any number of extra labelled values (added with <strong>&#x2795;&#xFE0E; Add field</strong> in the form), each optionally marked <em>secret</em> to mask it in the panel. Like tags, they live inside the encrypted payload and are as protected as every other field.</p>

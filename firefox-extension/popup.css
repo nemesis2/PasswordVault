@@ -263,6 +263,8 @@ li.expanded .entry-name::before { content: "▾ "; color: var(--accent); }
 .about-section li { margin-bottom: 4px; border: none; background: none; border-radius: 0; overflow: visible; }
 .about-section a { color: var(--accent); text-decoration: none; }
 .about-section a:hover { color: var(--accent-h); }
+#about-version { color: var(--accent); text-decoration: none; }
+#about-version:hover { color: var(--accent-h); }
 .about-section code {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 11px;
@@ -270,18 +272,3 @@ li.expanded .entry-name::before { content: "▾ "; color: var(--accent); }
   padding: 1px 4px;
   border-radius: 3px;
 }
-
-.cr-table { border-collapse: collapse; margin: 2px 0 4px; width: 100%; }
-.cr-table td { padding: 2px 6px 2px 0; vertical-align: middle; }
-.cr-name code { background: transparent; padding: 0; }
-.cr-tag { text-align: right; }
-.cr-aead, .cr-ctr {
-  display: inline-block;
-  font-size: 9px;
-  font-weight: 700;
-  letter-spacing: 0.05em;
-  padding: 1px 5px;
-  border-radius: 3px;
-}
-.cr-aead { background: rgba(63, 207, 142, 0.18); color: var(--green); }
-.cr-ctr { background: var(--panel-2); color: var(--dim); }

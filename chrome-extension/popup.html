@@ -83,28 +83,7 @@
             </p>
           </div>          
 
-          <div class="about-section">
-            <h3>&#x26D3;&#xFE0E; Encryption Pipeline</h3>
-            <p>
-              Identical to the vault's v6 scheme. Two memory-hard <code>Argon2id</code> master keys per
-              record (one per password) are HKDF-SHA-256 expanded into per-cipher subkeys. Payloads are
-              wrapped in a four-cipher cascade; entry names in two layers. Both passwords are required.
-            </p>
-          </div>
-
-          <div class="about-section">
-            <h3>&#x1F6E1;&#xFE0E; Ciphers</h3>
-            <table class="cr-table">
-              <tr><td class="cr-name"><code>ChaCha20-Poly1305</code></td><td class="cr-tag"><span class="cr-aead">AEAD</span></td></tr>
-              <tr><td class="cr-name"><code>AES-256-GCM</code></td><td class="cr-tag"><span class="cr-aead">AEAD</span></td></tr>
-              <tr><td class="cr-name"><code>Twofish-256</code></td><td class="cr-tag"><span class="cr-ctr">CTR</span></td></tr>
-              <tr><td class="cr-name"><code>Serpent-256</code></td><td class="cr-tag"><span class="cr-ctr">CTR</span></td></tr>
-              <tr><td class="cr-name"><code>Argon2id</code></td><td class="cr-tag"><span class="cr-ctr">KDF</span></td></tr>
-            </table>
-            <p class="dim">The crypto runs the vault's exact code (a verbatim slice of its <code>javascript.js</code>), parallelised across an Argon2id Web Worker pool.</p>
-          </div>
-
-          <p class="dim" style="text-align:center; margin-top:14px;">Version <span id="about-version"></span></p>
+          <p class="dim" style="text-align:center; margin-top:14px;">Version <a id="about-version" href="https://github.com/nemesis2/PasswordVault" target="_blank" rel="noopener"></a></p>
 
         </div>
       </div>

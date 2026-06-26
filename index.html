@@ -30,8 +30,12 @@
   --green-rgb:   63,207,142;
   --warn:        #f5a623;
   --warn-rgb:    245,166,35;
+  /* Text/fill on a saturated accent or danger surface (white in both themes —
+     both --accent and --danger stay dark enough for white text). */
+  --on-accent:   #fff;
   --mono:        'SF Mono','Cascadia Code','Fira Mono',Consolas,monospace;
   --r:           6px;
+  --r-sm:        4px;   /* tighter radius for inputs, tooltips, code/badge chips */
   --shadow:      0 8px 24px rgba(0,0,0,.5);
   color-scheme:  dark;
 }
@@ -146,7 +150,7 @@ body.modal-open { overflow: hidden; }
      password copy glyphs below it (which have no padding). */
   margin-right: -5px;
 }
-.del-btn:hover { color: var(--danger); background: rgba(255,92,92,.1); }
+.del-btn:hover { color: var(--danger); background: rgba(var(--danger-rgb),.1); }
 
 .edit-btn {
   background: none;
@@ -351,7 +355,7 @@ body:not(.wide-controls) #content {
 
 .btn-accent {
   background: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
 }
 .btn-accent:hover { background: var(--accent-h); }
 .btn-accent:disabled { opacity: .4; cursor: default; }
@@ -481,16 +485,25 @@ body.wide-controls .ctrl-form #entry-count-row {
   border-radius: 50%;
   display: inline-flex; align-items: center; justify-content: center;
   font-size: 11px; font-weight: 700; line-height: 1;
-  color: #fff; text-transform: uppercase;
+  color: var(--on-accent); text-transform: uppercase;
 }
-.entry-btn.selected {
+/* Three entry "active" states share an elevated fill + accent border:
+   .selected (open entry), .entry-selected (multi-select, defined later), and
+   .pal-active (palette keyboard-nav). Each layers its own ring/extra on top. */
+.entry-btn.selected,
+.entry-btn.entry-selected,
+#search-results .entry-btn.pal-active {
   background: var(--elevated);
   border-color: var(--accent);
+}
+/* Open entry + palette nav: outset accent ring, drop shadow, accent text.
+   (Multi-select uses an inset ring + a ✓ instead — see .entry-selected.) */
+.entry-btn.selected,
+#search-results .entry-btn.pal-active {
   color: var(--accent);
   box-shadow: 0 0 0 1px var(--accent), 0 4px 14px rgba(var(--accent-rgb),.18);
-  transform: none;
-  transition: none;
 }
+.entry-btn.selected { transform: none; transition: none; }
 
 /* ─── New entry card ──────────────────────────────────────── */
 .card {
@@ -501,12 +514,16 @@ body.wide-controls .ctrl-form #entry-count-row {
   margin-top: 12px;
 }
 
-.card-title {
+/* Shared section-label typography. .card-title is a header bar (padding +
+   border + fill); .gen-title (defined later) is an inline label (margin only). */
+.card-title, .gen-title {
   font-size: 11px;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: .07em;
   color: var(--text-2);
+}
+.card-title {
   padding: 10px 14px;
   border-bottom: 1px solid var(--border);
   background: var(--surface);
@@ -558,7 +575,7 @@ body.wide-controls .ctrl-form #entry-count-row {
 .btn-sm {
   background: var(--elevated);
   border: 1px solid var(--border);
-  border-radius: 4px;
+  border-radius: var(--r-sm);
   color: var(--text-2);
   cursor: pointer;
   font-size: 11px;
@@ -601,12 +618,8 @@ body.wide-controls .ctrl-form #entry-count-row {
   padding: 12px 14px;
   margin-top: 8px;
 }
+/* Typography shared with .card-title above; only the spacing differs. */
 .gen-title {
-  font-size: 11px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: .07em;
-  color: var(--text-2);
   margin-bottom: 10px;
 }
 .gen-grid {
@@ -658,7 +671,7 @@ input[type=checkbox]:checked::after {        /* X — two crossing strokes */
   left: 50%; top: 50%;
   width: 2px; height: 9px;
   border-radius: 1px;
-  background: #fff;
+  background: var(--on-accent);
 }
 input[type=checkbox]:checked::before { transform: translate(-50%, -50%) rotate(45deg); }
 input[type=checkbox]:checked::after  { transform: translate(-50%, -50%) rotate(-45deg); }
@@ -668,7 +681,7 @@ input[type=radio]:checked::after {           /* center dot */
   left: 50%; top: 50%;
   width: 6px; height: 6px;
   border-radius: 50%;
-  background: #fff;
+  background: var(--on-accent);
   transform: translate(-50%, -50%);
 }
 input[type=checkbox]:focus-visible,
@@ -682,7 +695,7 @@ input[type=radio]:disabled { opacity: .45; cursor: default; }
 #customchars {
   background: var(--elevated);
   border: 1px solid var(--border);
-  border-radius: 4px;
+  border-radius: var(--r-sm);
   color: var(--text);
   font-size: 12px;
   font-family: var(--mono);
@@ -696,7 +709,7 @@ input[type=radio]:disabled { opacity: .45; cursor: default; }
   width: 54px;
   background: var(--elevated);
   border: 1px solid var(--border);
-  border-radius: 4px;
+  border-radius: var(--r-sm);
   color: var(--text);
   font-size: 13px;
   padding: 2px 6px;
@@ -766,7 +779,7 @@ input[type=radio]:disabled { opacity: .45; cursor: default; }
 
 /* ─── Copy flash on field/token click ────────────────────── */
 @keyframes field-flash {
-  0%   { background: rgba(var(--accent-rgb),.18); border-radius: 4px; }
+  0%   { background: rgba(var(--accent-rgb),.18); border-radius: var(--r-sm); }
   100% { background: transparent; }
 }
 .copy-flash { animation: field-flash 600ms ease-out forwards; }
@@ -819,7 +832,7 @@ input[type=radio]:disabled { opacity: .45; cursor: default; }
   margin-top: 10px;
   background: var(--card);
   border: 1px solid var(--border);
-  border-radius: 4px;
+  border-radius: var(--r-sm);
   padding: 8px 10px;
   font-size: 12px;
 }
@@ -832,7 +845,9 @@ input[type=radio]:disabled { opacity: .45; cursor: default; }
   position: fixed;
   inset: 0;
   background: rgba(0,0,0,.6);
-  z-index: 400;
+  /* Above the About modal (z-index 800) so the palette stays usable when
+     invoked while About is open, instead of being buried behind it. */
+  z-index: 900;
   display: none;
   align-items: flex-start;
   justify-content: center;
@@ -930,6 +945,43 @@ input[type=radio]:disabled { opacity: .45; cursor: default; }
   padding: 16px;
   text-align: center;
 }
+/* Palette keyboard-nav highlight (.pal-active) shares the decoded .selected
+   look — both are styled together near the .entry-btn.selected base above. */
+/* ">" command rows span both grid columns; the glyph + hint badge tweak the entry look. */
+#search-results .entry-btn.pal-cmd { grid-column: 1 / -1; }
+#search-results .pal-cmd-glyph {
+  background: var(--card);
+  color: var(--accent);
+  font-weight: 700;
+}
+#search-results .pal-cmd-hint {
+  flex: 0 0 auto;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 0 5px;
+  line-height: 16px;
+}
+#search-results .entry-btn.pal-disabled {
+  opacity: .42;
+  cursor: default;
+  pointer-events: none;
+}
+/* Footer hint bar: keyboard cheat-sheet for the palette. */
+#search-hint {
+  flex: 0 0 auto;
+  font-size: 10.5px;
+  color: var(--text-2);
+  padding: 6px 14px;
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#search-hint:empty { display: none; }
 
 /* ─── Auto-lock warning ───────────────────────────────────── */
 #lock-warning {
@@ -979,7 +1031,7 @@ input[type=radio]:disabled { opacity: .45; cursor: default; }
   transform: translateX(-50%);
   background: var(--elevated);
   border: 1px solid var(--border-2);
-  border-radius: 4px;
+  border-radius: var(--r-sm);
   color: var(--text);
   font-size: 11px;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
@@ -1014,7 +1066,7 @@ input[type=radio]:disabled { opacity: .45; cursor: default; }
   z-index: 9600;
   background: var(--elevated);
   border: 1px solid var(--border-2);
-  border-radius: 4px;
+  border-radius: var(--r-sm);
   color: var(--text);
   font-size: 11px;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
@@ -1078,7 +1130,7 @@ input[type=radio]:disabled { opacity: .45; cursor: default; }
   font-size: 18px;
   line-height: 1;
   padding: 2px 6px;
-  border-radius: 4px;
+  border-radius: var(--r-sm);
   transition: color .15s, background .15s;
 }
 #about-close:hover { color: var(--text); background: var(--elevated); }
@@ -1092,6 +1144,9 @@ input[type=radio]:disabled { opacity: .45; cursor: default; }
   scrollbar-color: var(--elevated) var(--surface);
   scrollbar-width: thin;
 }
+/* Programmatically focused (tabindex="-1") so the keyboard scrolls the modal;
+   no focus ring needed on the scroll container itself. */
+#about-body:focus { outline: none; }
 #about-body::-webkit-scrollbar { width: 6px; }
 #about-body::-webkit-scrollbar-track { background: var(--surface); }
 #about-body::-webkit-scrollbar-thumb { background: var(--elevated); border-radius: 3px; }
@@ -1153,7 +1208,7 @@ input[type=radio]:disabled { opacity: .45; cursor: default; }
   margin-top: 10px;
   background: var(--card);
   border: 1px solid var(--border);
-  border-radius: 4px;
+  border-radius: var(--r-sm);
   padding: 8px 10px;
   font-size: 12px;
 }
@@ -1164,7 +1219,7 @@ input[type=radio]:disabled { opacity: .45; cursor: default; }
   background: var(--card);
   border: 1px solid var(--border);
   border-left: 3px solid var(--warn);
-  border-radius: 4px;
+  border-radius: var(--r-sm);
   padding: 8px 10px;
   font-size: 12px;
   color: var(--warn);
@@ -1178,7 +1233,7 @@ input[type=radio]:disabled { opacity: .45; cursor: default; }
   margin-top: 10px;
   background: var(--card);
   border: 1px solid var(--border);
-  border-radius: 4px;
+  border-radius: var(--r-sm);
   padding: 8px 10px;
   font-size: 12px;
 }
@@ -1212,7 +1267,7 @@ input[type=radio]:disabled { opacity: .45; cursor: default; }
   margin-top: 10px;
   background: var(--card);
   border: 1px solid var(--border);
-  border-radius: 4px;
+  border-radius: var(--r-sm);
   padding: 8px 10px;
   font-size: 12px;
 }
@@ -1259,8 +1314,8 @@ input[type=radio]:disabled { opacity: .45; cursor: default; }
 .fav-btn:hover    { color: var(--warn); background: rgba(var(--warn-rgb),.1); }
 .fav-btn.is-fav   { color: var(--warn); }
 .entry-btn.entry-fav::before { content: '\2605'; color: var(--warn); margin-right: 5px; }
-.entry-btn.entry-passkey .entry-lbl::after { content: '\1F510'; margin-left: 6px; opacity: .85; }
-.entry-btn.entry-note .entry-lbl::after { content: '\1F4DD'; margin-left: 6px; opacity: .8; }
+.entry-btn.entry-passkey .entry-lbl::after { content: '\1F510\FE0E'; margin-left: 6px; opacity: .85; }
+.entry-btn.entry-note .entry-lbl::after { content: '\1F4DD\FE0E'; margin-left: 6px; opacity: .8; }
 
 /* ─── Entry type toggle (entry form) ──────────────────────── */
 .type-toggle { display: flex; gap: 6px; flex: 1; min-width: 0; }
@@ -1271,6 +1326,9 @@ input[type=radio]:disabled { opacity: .45; cursor: default; }
   transition: background .15s, color .15s, border-color .15s;
 }
 .type-opt:hover { background: var(--elevated); color: var(--text); }
+/* .is-on is the active marker for both toggles, but the styling intentionally
+   differs by control type: the segmented type button gets a full ring + fill,
+   while the inline #select-toggle is a text link that only recolors (see below). */
 .type-opt.is-on {
   background: var(--elevated); color: var(--accent); border-color: var(--accent);
   box-shadow: 0 0 0 1px var(--accent);
@@ -1303,9 +1361,9 @@ input[type=radio]:disabled { opacity: .45; cursor: default; }
 /* In select mode the grid buttons toggle selection instead of decoding. */
 .entry-grid.select-mode .entry-btn { cursor: copy; }
 .entry-grid.select-mode .entry-btn:hover { transform: none; box-shadow: none; }
+/* Multi-select: inset ring (vs the outset ring of .selected) + a ✓ marker.
+   Fill + accent border come from the shared base rule near .entry-btn.selected. */
 .entry-btn.entry-selected {
-  background: var(--elevated);
-  border-color: var(--accent);
   box-shadow: 0 0 0 1px var(--accent) inset;
 }
 .entry-btn.entry-selected::after {
@@ -1343,7 +1401,7 @@ input[type=radio]:disabled { opacity: .45; cursor: default; }
   margin-top: 10px;
   background: var(--card);
   border: 1px solid var(--border);
-  border-radius: 4px;
+  border-radius: var(--r-sm);
   padding: 10px;
 }
 .chpw-title {
@@ -1365,7 +1423,7 @@ input[type=radio]:disabled { opacity: .45; cursor: default; }
 .chpw-grid input {
   background: var(--bg);
   border: 1px solid var(--border);
-  border-radius: 4px;
+  border-radius: var(--r-sm);
   color: var(--text);
   font-size: 13px;
   padding: 6px 8px;
@@ -1399,7 +1457,7 @@ input[type=radio]:disabled { opacity: .45; cursor: default; }
 .about-chip {
   background: var(--card);
   border: 1px solid var(--border);
-  border-radius: 4px;
+  border-radius: var(--r-sm);
   color: var(--text);
   font-size: 11px;
   font-family: var(--mono);
@@ -1450,7 +1508,7 @@ input[type=radio]:disabled { opacity: .45; cursor: default; }
 kbd {
   font-family: var(--mono); font-size: 11px; line-height: 1.4; color: var(--text);
   background: var(--card); border: 1px solid var(--border-2);
-  border-radius: 4px; padding: 1px 6px; box-shadow: 0 1px 0 var(--border-2);
+  border-radius: var(--r-sm); padding: 1px 6px; box-shadow: 0 1px 0 var(--border-2);
 }
 
 /* ─── Runtime self-test (About modal) ───────────────────── */
@@ -1508,12 +1566,12 @@ kbd {
   border-radius: var(--r);
   max-width: 500px;
   width: 100%;
-  box-shadow: 0 12px 48px rgba(255,92,92,.3);
+  box-shadow: 0 12px 48px rgba(var(--danger-rgb),.3);
   overflow: hidden;
 }
 #crypto-warn-head {
   background: var(--danger);
-  color: #fff;
+  color: var(--on-accent);
   padding: 18px 22px;
   font-size: 17px;
   font-weight: 700;
@@ -1755,7 +1813,7 @@ kbd {
     </div>
     <div style="grid-column:2/4;display:flex;gap:6px">
       <button class="btn btn-ghost" data-action="clear-display" aria-label="Clear displayed entry" data-tip="Clear displayed entry (C)">C</button>
-      <button class="btn btn-ghost" id="search-btn" data-action="toggle-search" aria-label="Search entries" data-tip="Search entries (?)">&#x1F50D;&#xFE0E;</button>
+      <button class="btn btn-ghost" id="search-btn" data-action="toggle-search" aria-label="Search entries" data-tip="Search / command palette (Ctrl-K or ?)">&#x1F50D;&#xFE0E;</button>
       <button class="btn btn-ghost" id="theme-btn" data-action="toggle-theme" aria-label="Toggle light/dark theme" data-tip="Toggle light / dark theme">&#x1F319;&#xFE0E;</button>
       <button class="btn btn-ghost" id="about-btn" data-action="open-about" aria-label="About and crypto info" data-tip="About &amp; crypto info (A / I)">&#x2139;&#xFE0E;</button>
     </div>
@@ -1804,8 +1862,6 @@ kbd {
   <div id="reveal-progress" style="display:none"><div id="reveal-progress-fill"></div></div>
   <div class="entry-grid">
 <!-- Part 1 -->
-<span id="vault-manifest" hidden data-manifest=""></span>
-<span id="vault-kdf" hidden data-kdf="a2id|131072|3|1"></span>
 	
 <!-- Part 2 -->
   </div><!-- /entry-grid -->
@@ -1852,7 +1908,7 @@ kbd {
           <input class="finput" type="text" id="password" aria-label="Entry password" autocomplete="new-password" autocorrect="off" autocapitalize="none"/>
           <div id="pw-gen-btns">
             <button class="btn-sm" data-action="generate" data-tip="Generate a random password">Generate</button>
-            <button class="btn-sm" id="copy-button" data-action="copy-current" disabled data-tip="Copy to clipboard">&#x1F4CB;&#xFE0E;</button>
+            <button class="btn-sm" id="copy-button" data-action="copy-current" disabled aria-label="Copy generated password" data-tip="Copy to clipboard">&#x1F4CB;&#xFE0E;</button>
           </div>
         </div>
         <div id="pw-strength-wrap" class="pw-strength-wrap" style="display:none">
@@ -1939,9 +1995,10 @@ kbd {
 <!-- Search overlay -->
 <div id="search-overlay">
   <div id="search-box">
-    <input type="text" id="search-input" placeholder="Search names…  or #tag  @note  !field" aria-label="Search entries by name, #tag, @note, or !custom field" autocomplete="off"/>
+    <input type="text" id="search-input" placeholder="Search…  #tag  @note  !field  &gt;command" aria-label="Search entries by name, #tag, @note, !custom field, or >command" autocomplete="off"/>
     <div id="search-count"></div>
     <div id="search-results"></div>
+    <div id="search-hint"></div>
   </div>
 </div>
 
@@ -1974,13 +2031,13 @@ kbd {
       <h2>&#x2139;&#xFE0E;&nbsp; About Password Vault</h2>
       <button id="about-close" data-action="close-about" aria-label="Close">&times;</button>
     </div>
-    <div id="about-body">
+    <div id="about-body" tabindex="-1">
 
       <div class="about-section">
         <h3>&#x2139;&#xFE0E; Description</h3>
         <p>Self-hosted, client-side encrypted password manager served by a <strong>PHP-capable web server</strong> — or, with no PHP at all, by the bundled standalone <strong>Node.js server</strong> (<code>server.js</code>). All encryption and decryption happens entirely in your browser using the <strong>WebCrypto API</strong> — the server only stores and serves ciphertext and never sees your plaintext passwords.</p>
         <p style="margin-top:4px">Open source, released under the <a href="https://opensource.org/license/mit" target="_blank" rel="noopener">MIT License</a>.</p>
-        <p style="margin-top:4px; color:var(--text-2); font-size:.85em;">Version <span id="about-version">1.1.3</span></p>
+        <p style="margin-top:4px; color:var(--text-2); font-size:.85em;">Version <a id="about-version" href="https://github.com/nemesis2/PasswordVault" target="_blank" rel="noopener">1.1.4</a></p>
       </div>
 
       <div class="about-section" id="about-vault-tools">
@@ -2145,10 +2202,10 @@ kbd {
       
       <div class="about-section" id="about-shortcuts">
         <h3>&#x2328;&#xFE0E; Keyboard Shortcuts</h3>
-        <p>Single-key shortcuts work whenever you are not typing in a field. <kbd>Shift</kbd>&#x202F;<kbd>Enter</kbd> works inside the entry form.</p>
+        <p>Single-key shortcuts work whenever you are not typing in a field. <kbd>Shift</kbd>&#x202F;<kbd>Enter</kbd> works inside the entry form, and <kbd>Ctrl</kbd>&#x202F;<kbd>K</kbd> works from anywhere (even while typing).</p>
         <table class="ks-table">
           <tr><td class="ks-key"><kbd>Shift</kbd> <kbd>Enter</kbd></td><td class="ks-desc">Save the entry being added or edited (from any field in the form &mdash; except <strong>Notes</strong>, where it inserts a newline)</td></tr>
-          <tr><td class="ks-key"><kbd>?</kbd></td><td class="ks-desc">Open / close search</td></tr>
+          <tr><td class="ks-key"><kbd>Ctrl</kbd> <kbd>K</kbd> / <kbd>?</kbd></td><td class="ks-desc">Open / close the command palette &mdash; fuzzy search, jump, copy, edit, and <code>&gt;</code> commands (see <em>Command palette</em> below)</td></tr>
           <tr><td class="ks-key"><kbd>N</kbd></td><td class="ks-desc">New entry (when the &#xff0b; New button is enabled)</td></tr>
           <tr><td class="ks-key"><kbd>E</kbd></td><td class="ks-desc">Edit the selected entry (when one is displayed)</td></tr>
           <tr><td class="ks-key"><kbd>Shift</kbd> <kbd>D</kbd></td><td class="ks-desc">Delete the selected entry, with confirmation (when one is displayed)</td></tr>
@@ -2165,7 +2222,9 @@ kbd {
       <div class="about-section" id="about-organizing">
         <h3>&#x1F3F7;&#xFE0E; Organizing &amp; Searching</h3>
         <p><strong>Tags.</strong> Each entry can carry a comma-separated list of tags (e.g. <code>work, email, personal</code>). Tags are normalized on save &mdash; lowercased, trimmed, and de-duplicated &mdash; and are stored <strong>inside the encrypted payload</strong>, exactly like the password and notes, so they are as protected as any other field and never appear in the database in the clear.</p>
-        <p style="margin-top:6px"><strong>Scoped search.</strong> The search overlay matches by a leading character: type plainly to search entry <strong>names</strong>, prefix with <code>#</code> to search <strong>tags</strong> (e.g. <code>#work</code>), <code>@</code> to search <strong>notes</strong> (e.g. <code>@recovery</code>), or <code>!</code> to search <strong>custom fields</strong> &mdash; both labels and values (e.g. <code>!PIN</code>). The count line shows which scope is active. Tag, note, and custom-field search read the decrypted payloads cached in memory, so they cover every entry once both passwords are entered and all names have been revealed.</p>
+        <p style="margin-top:6px"><strong>Command palette.</strong> Press <kbd>Ctrl</kbd>&#x202F;<kbd>K</kbd> (or <kbd>?</kbd>, or the &#x1F50D;&#xFE0E; toolbar button) to open the palette. Type to <strong>fuzzy-find</strong> entries by name, navigate the results with <kbd>&uarr;</kbd>&#x202F;<kbd>&darr;</kbd>, and press <kbd>Enter</kbd> to open the highlighted entry. With an entry highlighted you can act on it without leaving the keyboard: <kbd>Ctrl</kbd>&#x202F;<kbd>C</kbd> copies its password, <kbd>Ctrl</kbd>&#x202F;<kbd>U</kbd> copies its username, and <kbd>Ctrl</kbd>&#x202F;<kbd>E</kbd> opens it for editing (use <kbd>&#x2318;</kbd> in place of <kbd>Ctrl</kbd> on a Mac). The hint bar along the bottom of the palette is a reminder of these.</p>
+        <p style="margin-top:6px"><strong>Command mode.</strong> Type a leading <code>&gt;</code> to switch the palette into command mode &mdash; a fuzzy-filtered list of vault actions (New entry, Lock, Export / Import, Audit, Passkeys, Trash, Change passwords / KDF, Toggle theme, and more). Actions that need the vault open are dimmed until both passwords are entered, and those that live in the About panel open it scrolled to the right section.</p>
+        <p style="margin-top:6px"><strong>Scoped search.</strong> Within the palette, the leading character chooses what to match: type plainly to fuzzy-match entry <strong>names</strong>, prefix with <code>#</code> to search <strong>tags</strong> (e.g. <code>#work</code>), <code>@</code> to search <strong>notes</strong> (e.g. <code>@recovery</code>), or <code>!</code> to search <strong>custom fields</strong> &mdash; both labels and values (e.g. <code>!PIN</code>). The count line shows which scope is active. Tag, note, and custom-field search read the decrypted payloads cached in memory, so they cover every entry once both passwords are entered and all names have been revealed.</p>
         <p style="margin-top:6px"><strong>Group A&ndash;Z.</strong> The entry grid is always sorted alphabetically; the <strong>Group A&ndash;Z</strong> toggle (beside the entry count, once the vault is unlocked) adds sticky first-letter headers above each run of entries &mdash; names not starting with a letter are bucketed under <code>#</code>. The preference is remembered per vault in your browser (on by default).</p>
         <p style="margin-top:6px"><strong>Favorites.</strong> Click the &#x2606; star in the display panel (or press <kbd>F</kbd>) to favorite the open entry. Favorites pin to the top of the grid &mdash; under a <strong>&#x2605; Favorites</strong> header when grouping is on &mdash; and show a &#x2605; on their button. The set is remembered per vault in your browser as a <strong>one-way hash of each name</strong> (never the name itself), so it survives edits and reveals nothing if local storage is read.</p>
         <p style="margin-top:6px"><strong>Custom fields.</strong> Entries can carry any number of extra labelled values (added with <strong>&#x2795;&#xFE0E; Add field</strong> in the form), each optionally marked <em>secret</em> to mask it in the panel. Like tags, they live inside the encrypted payload and are as protected as every other field.</p>

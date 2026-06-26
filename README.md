@@ -4,7 +4,6 @@ A self-hosted, zero-knowledge password manager that runs entirely in your browse
 
 No accounts, no cloud, no database server, no runtime dependencies fetched from a CDN. One directory, one flat file, and your choice of backend — a single PHP script or the bundled dependency-free Node server ([`server.js`](#running-without-php-standalone-node-server)). [MIT-licensed](LICENSE).
 
-
 Full disclosure: This originally started a simple custom built/hacked together AES vault that the author used for years.  
 Then Claude was used to audit the code and slowly expand it.  
 
@@ -42,6 +41,7 @@ The vault is a single page served by any PHP-capable web server — or by the bu
 - 🧩 **Custom fields, password history & age** — add arbitrary labelled fields per entry (optionally masked as *secret*), all encrypted in the payload; editing an entry automatically archives the previous password (with a date) so you can recover an old one; a **Modified** column shows when the password last changed, with a hover tooltip giving the entry's creation date and age
 - 📝 **Secure notes** — an entry type toggle for a title + encrypted body with no URL/username/password/2FA, for things that aren't logins
 - ☑ **Multi-select & bulk operations** — a grid select mode to favorite, tag, or delete many entries at once in a single atomic write, with an Undo for bulk delete
+- ⌨️ **Command palette** (`Ctrl`+`K` / `?`) — fuzzy-find and jump to entries, copy a password / username or jump to edit with keyboard chords, and run vault actions from a `>` command mode, all without the mouse
 - 🔍 **Live search**, ✏ **edit**, 🗑 **delete** (soft — recoverable from the trash), and instant in-place grid updates — no page reloads
 - ⏱ **Auto-lock** after 5 minutes idle (with a 60-second warning), instant lock on double-Escape, and **clipboard auto-clear** 45 seconds after copying a secret
 - 🧪 **Runtime self-test** — every cipher and the Argon2id WASM are verified on every page load; failures raise a warning before you type a password
@@ -230,16 +230,16 @@ Next to the password, a **📝 Modified** column shows the date the password was
 
 If an entry stores a TOTP secret, the code appears automatically with a countdown ring showing the seconds left in the current window. Clicking the token area copies the current code. Plain Base32 secrets use the standard 6-digit / 30-second / SHA-1 settings; if you store a full `otpauth://` URI instead, its `digits`, `period`, and `algorithm` (SHA-1 / SHA-256 / SHA-512) are honored, and **Steam Guard** secrets render as their 5-character codes — the countdown ring follows the entry's period in every case.
 
-### Searching
+### Searching & the command palette
 
-Press 🔍 to open the search overlay and type — the list filters live. Click a result to decrypt it; **Escape** dismisses. Searches are **scoped by a leading character**:
+Press **`Ctrl`+`K`** (also **`?`**, or the 🔍 toolbar button) to open the **command palette**. `Ctrl`+`K` works from anywhere — even while typing in a field — and toggles the palette closed again; **Escape** also dismisses it.
 
-- *(no prefix)* — match the entry **name** (the default)
-- **`#`** — match **tags** (e.g. `#work`)
-- **`@`** — match **notes** (e.g. `@recovery`)
-- **`!`** — match **custom fields**, both labels and values (e.g. `!PIN`)
+- **Fuzzy find & jump.** Type to fuzzy-match entry **names** (the characters just have to appear in order). Move the highlight with **`↑` / `↓`** and press **`Enter`** to open the highlighted entry (it decrypts, scrolls into view, and the palette closes).
+- **Act without the mouse.** With an entry highlighted, **`Ctrl`+`C`** copies its password, **`Ctrl`+`U`** copies its username, and **`Ctrl`+`E`** opens it for editing (use **`⌘`** instead of `Ctrl` on a Mac). The hint bar at the bottom of the palette is a reminder of these.
+- **Command mode.** A leading **`>`** switches to a fuzzy-filtered list of vault actions — New entry, Lock, Export / Import (`.lines` / CSV / KeePass / 1Password), Audit, Passkeys, Trash, Change passwords / KDF, Sign, Toggle theme / auto-lock / Group A–Z, Run self-test, About. Actions needing an open vault are dimmed until both passwords are entered; ones that live in the About panel open it scrolled to the right section.
+- **Scoped search.** A leading character chooses the scope: *(none)* fuzzy-matches **names**, **`#`** searches **tags** (`#work`), **`@`** searches **notes** (`@recovery`), and **`!`** searches **custom fields** — both labels and values (`!PIN`). The count line shows which scope is active.
 
-The count line shows which scope is active ("Searching custom fields…"). Tag, note, and custom-field search look inside the encrypted payload, so they cover every entry whose name has already been revealed this session (i.e. once both passwords are entered and all names decrypt).
+Tag, note, and custom-field search look inside the encrypted payload, so they cover every entry whose name has already been revealed this session (i.e. once both passwords are entered and all names decrypt).
 
 ### Grouping & sorting
 
@@ -324,12 +324,13 @@ The vault carries a **keyed signature over the entire record set** — an HMAC-S
 
 ### Keyboard shortcuts
 
-Single-key shortcuts work whenever you are not typing in a field (`Shift`+`Enter` works inside the entry form):
+Single-key shortcuts work whenever you are not typing in a field (`Shift`+`Enter` works inside the entry form; `Ctrl`+`K` works from anywhere, even while typing):
 
 | Key | Action |
 |-----|--------|
 | `Shift`+`Enter` | Save the entry being added or edited (from any field in the form — except **Notes**, where it inserts a newline) |
-| `?` | Open / close search |
+| `Ctrl`+`K` / `?` | Open / close the command palette — fuzzy search, jump, copy/edit chords, and `>` commands (see [Searching & the command palette](#searching--the-command-palette)) |
+| `Ctrl`+`C` / `Ctrl`+`U` / `Ctrl`+`E` | In the palette, on the highlighted entry: copy password / copy username / edit (`⌘` on a Mac) |
 | `N` | New entry (when the ＋ New button is enabled) |
 | `E` | Edit the selected entry (when one is displayed) |
 | `Shift`+`D` | Delete the selected entry, with confirmation |
