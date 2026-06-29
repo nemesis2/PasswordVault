@@ -15,12 +15,13 @@ crypto, storage, or the server.
 | `post.php` | PHP backend: write protocol, `index.html` regeneration, auth, rate limiting. |
 | `server.js` | Dependency-free Node backend — a byte-faithful port of `post.php` + the static/header layer. |
 | `parity-test.js` | Proves `server.js` is byte-identical to `post.php`. |
+| `run-tests.sh`, `test-*.js`, `test-browser/` | The automated test suite (client crypto/logic, server protocol + HTTP, extension selftests, browser E2E, parity). Run `./run-tests.sh`; see its header for the per-suite breakdown. |
 | `sw.js` | Service worker (asset caching + offline fallback; never caches the vault document). |
 | `argon2-worker.js` | Argon2id Web Worker (the `hash-wasm` bundle + a message tail). |
 | `chrome-extension/`, `firefox-extension/`, `tui.node/` | Companion clients. |
 | `moved/` | Offline re-encryption tooling and cipher-bundle build inputs (private repo only). |
 
-A fuller architecture reference lives in [CLAUDE.md](CLAUDE.md).
+A fuller architecture and feature reference lives in the [README](README.md).
 
 ## Local development
 
@@ -52,10 +53,16 @@ files afterward so php-fpm can still rewrite them.
 ## Required checks before a PR
 
 1. **JS syntax:** `node --check javascript.js && node --check sw.js`
-2. **Backend parity** (after any change to `post.php` *or* `server.js`):
+2. **Full test suite:**
    ```bash
-   node parity-test.js          # needs `php` on PATH; must report 12/12 byte-identical
+   ./run-tests.sh               # all green or skipped; --quick skips browser + parity
    ```
+   This runs the client crypto/logic, server protocol + HTTP-layer, extension
+   selftest, browser E2E, and PHP-parity suites. After any change to `post.php`
+   *or* `server.js` the parity suite must report **12/12 byte-identical** (needs
+   `php` on PATH). The browser suite needs a one-time
+   `cd test-browser && npm install && npx playwright install chromium`. See the
+   `run-tests.sh` header for the full per-suite breakdown.
 3. **Crypto self-test:** open the About modal in a browser and confirm the
    self-test banner is green (WebCrypto, ChaCha, AES, Twofish, Serpent, Argon2id).
 4. **Bundle integrity** (only if you touched an inlined cipher):
@@ -93,5 +100,8 @@ cat moved/argon2_bundle.js moved/argon2_worker_tail.js > argon2-worker.js
 ```
 
 `./verify-bundles.sh` automates rebuilding and diffing these against what's
-committed. See [CLAUDE.md](CLAUDE.md) → *Inlined Cipher Bundles* for details.
+committed.
 
+## Roadmap
+
+Open ideas and their status are tracked in [suggestions.md](suggestions.md).

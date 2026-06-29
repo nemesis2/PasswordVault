@@ -16,7 +16,7 @@
 // The write protocol is a faithful port of post.php — it must produce
 // byte-identical `lines` / `index.html` / `manifest` / `kdfparams`, because the
 // same vault can be served by either backend and the vm1 integrity manifest
-// signs an exact, sorted record set. See CLAUDE.md → Write Protocol.
+// signs an exact, sorted record set. post.php is the canonical write protocol.
 //
 // Serves ONE vault directory (default: cwd). Multi-instance /pass/<inst>/ web
 // hosting stays with nginx for now (out of scope for v1).
@@ -26,13 +26,12 @@
 // Module: require('./server.js') exposes the internals for the parity test.
 // =============================================================================
 
-const VERSION = '1.1.4';
+const VERSION = '1.1.6';
 
 const http    = require('http');
 const fs      = require('fs');
 const path    = require('path');
 const crypto  = require('crypto');
-const url      = require('url');
 const querystring = require('querystring');
 
 // ---- Constants (mirror post.php) ----
@@ -480,7 +479,7 @@ function isSameOrigin(req) {
     if (String(req.headers['x-requested-with'] || '').toLowerCase() !== 'xmlhttprequest') return false;
     const check = (v) => {
         try {
-            const u = new url.URL(v);
+            const u = new URL(v);
             // The passkey companion extension POSTs from its own unspoofable
             // chrome-extension:// / moz-extension:// origin; writes stay Basic-Auth
             // gated, so accept those alongside the same-origin web app.
@@ -495,7 +494,7 @@ function isSameOrigin(req) {
 
 function serveStatic(req, res, cfg) {
     let pathname;
-    try { pathname = decodeURIComponent(url.parse(req.url).pathname); } catch (_) { res.writeHead(400); return res.end('Bad request'); }
+    try { pathname = decodeURIComponent(new URL(req.url, 'http://localhost').pathname); } catch (_) { res.writeHead(400); return res.end('Bad request'); }
     if (pathname === '/') pathname = '/index.html';
     const rel = pathname.replace(/^\/+/, '');
     const segments = rel.split('/');
@@ -551,10 +550,11 @@ function handlePost(req, res, cfg, isRegen) {
 
 function createServer(cfg) {
     return http.createServer((req, res) => {
-        const parsed = url.parse(req.url, true);
+        let parsed;
+        try { parsed = new URL(req.url, 'http://localhost'); } catch (_) { res.writeHead(400); return res.end('Bad request'); }
         const pathname = parsed.pathname || '/';
         const isPostEndpoint = pathname === '/post' || pathname === '/post.php';
-        const isRegen = ('regen' in (parsed.query || {}));
+        const isRegen = parsed.searchParams.has('regen');
         if (isPostEndpoint || (req.method === 'POST')) {
             // Only the post endpoint accepts writes; a POST elsewhere is 404.
             if (!isPostEndpoint) { res.writeHead(404); return res.end('Not found'); }

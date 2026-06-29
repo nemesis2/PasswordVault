@@ -564,6 +564,16 @@
     return bytesToHex(new Uint8Array(sig));
   }
 
+  async function verifyManifest(manifestStr, pw, pw2, records, kdf) {
+    if (!manifestStr) return { status: "unsigned" };
+    var m = parseManifest(manifestStr);
+    if (!m) return { status: "fail", reason: "Malformed manifest" };
+    var sortedRecords = records.slice().sort();
+    var computed = await manifestHmacHex(pw, pw2, m.salt1Hex, m.salt2Hex, m.revision, m.timestamp, sortedRecords, kdf);
+    if (computed !== m.hmacHex) return { status: "fail", reason: "HMAC mismatch", revision: m.revision, timestamp: m.timestamp };
+    return { status: "ok", revision: m.revision, timestamp: m.timestamp };
+  }
+
   async function sha256Hex(str) {
     var buf = await crypto.subtle.digest("SHA-256", _TE.encode(str));
     return bytesToHex(new Uint8Array(buf));
@@ -600,6 +610,7 @@
     decodeRecord: decodeRecord,
     canonicalRecord: canonicalRecord,
     parseManifest: parseManifest,
+    verifyManifest: verifyManifest,
     buildManifest: buildManifest,
     computeTotp: computeTotp,
     parseOtp: parseOtp,

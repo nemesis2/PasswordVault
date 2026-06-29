@@ -21,6 +21,7 @@ XPI="$OUT/${NAME}-${VERSION}.xpi"
 FILES=(
   manifest.json
   background.js
+  vault-session.js
   crypto-vault.js
   crypto-ciphers.js
   webauthn.js

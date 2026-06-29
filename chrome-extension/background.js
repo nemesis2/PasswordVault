@@ -26,6 +26,7 @@ var LOCK_IDLE_SECS = 5 * 60; // lock after 5 minutes of true system idle
 var _unlocked = false;
 var _matchHosts = []; // entry URLs, for the per-tab ✓ match badge
 var _autoLock = true;
+var _integrityFailed = false;
 
 // ============================================================
 // Offscreen document lifecycle
@@ -180,8 +181,12 @@ function _anyMatch(host) {
 // matches a stored entry, cleared otherwise.
 function _updateBadge(tabId, url) {
   try {
-    var matched = _anyMatch(_hostOf(url || ""));
-    chrome.action.setBadgeText({ tabId: tabId, text: matched ? "✓" : "" });
+    if (_integrityFailed) {
+      chrome.action.setBadgeText({ tabId: tabId, text: "✗" });
+    } else {
+      var matched = _anyMatch(_hostOf(url || ""));
+      chrome.action.setBadgeText({ tabId: tabId, text: matched ? "✓" : "" });
+    }
   } catch (e) {}
 }
 
@@ -364,9 +369,12 @@ async function lock() {
   await toOffscreen({ cmd: "lock" });
   _unlocked = false;
   _matchHosts = [];
+  _integrityFailed = false;
   _persistState();
+  try { chrome.action.setBadgeBackgroundColor({ color: BADGE_BG }); } catch (e) {}
+  try { chrome.action.setBadgeTextColor({ color: BADGE_GREEN }); } catch (e) {}
   _setIcon(false);
-  _refreshAllBadges(); // clears ✓ everywhere (no matches while locked)
+  _refreshAllBadges(); // clears ✗/✓ everywhere (no matches while locked)
 }
 
 // Inject the fill into the active tab. The content script is programmatically
@@ -551,9 +559,17 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
           if (u && u.ok) {
             _unlocked = true;
             _matchHosts = u.hosts || [];
+            _integrityFailed = !!(u.integrityFailed);
             _persistState();
             _setIcon(true);
-            _refreshAllBadges(); // mark tabs whose site now matches a stored entry
+            if (_integrityFailed) {
+              try { chrome.action.setBadgeBackgroundColor({ color: "#c0392b" }); } catch (e) {}
+              try { chrome.action.setBadgeTextColor({ color: "#ffffff" }); } catch (e) {}
+            } else {
+              try { chrome.action.setBadgeBackgroundColor({ color: BADGE_BG }); } catch (e) {}
+              try { chrome.action.setBadgeTextColor({ color: BADGE_GREEN }); } catch (e) {}
+            }
+            _refreshAllBadges(); // mark tabs with ✗ (integrity fail) or ✓/"" (match indicator)
           }
           return u;
         } finally {
@@ -579,9 +595,17 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
         var fr = await fillTab(msg.tabId, d.username, d.password, d.url);
         return { ok: !!(fr && fr.ok), filled: fr && fr.filled };
       }
-      // match / reveal / details / totp — pure session reads, answered by the
-      // offscreen document (which holds the decrypted entries).
-      if (msg.cmd === "match" || msg.cmd === "reveal" || msg.cmd === "details" || msg.cmd === "totp") {
+      // selftest-badge — sent by offscreen when the crypto self-test fails.
+      if (msg.cmd === "selftest-badge") {
+        try { chrome.action.setBadgeBackgroundColor({ color: "#c0392b" }); } catch (e) {}
+        try { chrome.action.setBadgeTextColor({ color: "#ffffff" }); } catch (e) {}
+        try { chrome.action.setBadgeText({ text: "✗" }); } catch (e) {}
+        return { ok: true };
+      }
+      // match / reveal / details / totp / selftest — session reads answered by the
+      // offscreen document (which holds the decrypted entries and test result).
+      if (msg.cmd === "match" || msg.cmd === "reveal" || msg.cmd === "details" ||
+          msg.cmd === "totp" || msg.cmd === "selftest") {
         return await toOffscreen(msg);
       }
       // ---- passkey approval window <-> background ----

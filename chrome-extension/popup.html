@@ -44,12 +44,21 @@
         </div>
         <span id="progress-pct" class="progress-pct">0%</span>
       </div>
+      <div id="selftest-notice" class="selftest-notice" hidden>
+        <strong>&#x26A0;&#xFE0E; Crypto self-test failed</strong>
+        <ul id="selftest-failures"></ul>
+      </div>
     </section>
 
     <!-- Entries view -->
     <section id="entries-view" hidden>
       <input id="filter" type="search" placeholder="Filter entries…" autocomplete="off" />
       <p id="meta" class="meta"></p>
+      <div id="integrity-notice" class="integrity-notice" hidden>
+        <strong>&#x26A0;&#xFE0E; Vault integrity check failed</strong>
+        <p id="integrity-reason"></p>
+        <p>Auto-fill is disabled. Lock and re-unlock to retry, or inspect the vault.</p>
+      </div>
       <ul id="entries"></ul>
     </section>
 

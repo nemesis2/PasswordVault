@@ -187,9 +187,33 @@ async function showEntries() {
   }
   _entries = (r && r.entries) || [];
   var matches = _entries.filter(function (e) { return e.match; }).length;
-  $("meta").textContent =
-    _entries.length + " entries · " + (matches ? matches + " for " + _tabHost : "none match " + _tabHost);
-  render(_entries);
+  var metaEl = $("meta");
+  metaEl.textContent = "";
+  var metaL = document.createElement("span");
+  metaL.textContent = _entries.length + " entries · " + (matches ? matches + " for " + _tabHost : "none match " + _tabHost);
+  metaEl.appendChild(metaL);
+  var intg = r && r.integrity;
+  if (intg && intg.status === "ok") {
+    var metaR = document.createElement("span");
+    metaR.className = "meta-r";
+    metaR.textContent = "rev " + intg.revision + " · " + new Date(intg.timestamp * 1000).toLocaleDateString();
+    metaEl.appendChild(metaR);
+  }
+  var integrityFailed = intg && intg.status === "fail";
+  var intNotice = $("integrity-notice");
+  if (integrityFailed) {
+    if (intNotice) {
+      $("integrity-reason").textContent = intg.reason || "HMAC mismatch";
+      intNotice.hidden = false;
+    }
+    $("filter").disabled = true;
+    $("filter").value = "";
+    render([]);
+  } else {
+    if (intNotice) intNotice.hidden = true;
+    $("filter").disabled = false;
+    render(_entries);
+  }
 }
 
 function render(list) {
@@ -569,6 +593,24 @@ async function init() {
     );
   });
 
+  // Await the crypto self-test before showing the unlock form.
+  // On failure: disable inputs and show a notice; on pass: proceed normally.
+  var stResult = await send({ cmd: "selftest" });
+  if (stResult && !stResult.ok) {
+    var notice = $("selftest-notice");
+    if (notice) notice.hidden = false;
+    var failList = $("selftest-failures");
+    if (failList) {
+      failList.textContent = "";
+      (stResult.failures || []).forEach(function (f) {
+        var li = document.createElement("li");
+        li.textContent = f;
+        failList.appendChild(li);
+      });
+    }
+    [$("pw1"), $("pw2"), $("unlock-btn")].forEach(function (el) { if (el) el.disabled = true; });
+  }
+
   var st = await send({ cmd: "status" });
   if (st && st.unlocked) {
     if (st.vaultUrl) $("vault-url").value = st.vaultUrl;
@@ -578,7 +620,7 @@ async function init() {
     // initial unlock (see doUnlock / _maybeConfirmAutoLockDisabled).
   } else {
     showUnlock();
-    $("pw1").focus();
+    if (!stResult || stResult.ok) $("pw1").focus();
   }
 }
 

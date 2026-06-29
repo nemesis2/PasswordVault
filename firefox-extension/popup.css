@@ -39,7 +39,7 @@ header {
 .header-actions { display: flex; align-items: center; gap: 4px; }
 /* Red stopwatch shown just left of the Lock link while auto-lock is disabled. */
 .autolock-off {
-  color: #ff4d4f;
+  color: var(--red);
   font-size: 15px;
   line-height: 1;
   cursor: default;
@@ -143,7 +143,33 @@ button:disabled { opacity: 0.5; cursor: default; }
 .status { margin: 8px 0 0; min-height: 16px; font-size: 12px; color: var(--dim); }
 .status.err { color: var(--red); }
 .status.ok { color: var(--green); }
-.meta { margin: 0 0 8px; color: var(--dim); font-size: 11px; }
+.meta { margin: 0 0 8px; color: var(--dim); font-size: 11px; display: flex; justify-content: space-between; align-items: baseline; gap: 4px; }
+.meta-r { color: var(--dim); font-size: 10px; white-space: nowrap; flex-shrink: 0; }
+
+.selftest-notice {
+  margin-top: 10px;
+  padding: 9px 11px;
+  background: rgba(255,107,107,0.08);
+  border: 1px solid var(--red);
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--red);
+}
+.selftest-notice strong { display: block; margin-bottom: 5px; font-size: 13px; }
+.selftest-notice ul { margin: 0; padding-left: 16px; }
+.selftest-notice li { margin-bottom: 2px; }
+
+.integrity-notice {
+  margin-bottom: 10px;
+  padding: 9px 11px;
+  background: rgba(255,107,107,0.08);
+  border: 1px solid var(--red);
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--red);
+}
+.integrity-notice strong { display: block; margin-bottom: 5px; font-size: 13px; }
+.integrity-notice p { margin: 3px 0; }
 
 #filter { margin-bottom: 10px; }
 

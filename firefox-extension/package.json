@@ -1,6 +1,6 @@
 {
   "name": "vault-autofill-companion",
-  "version": "1.1.4",
+  "version": "1.1.6",
   "private": true,
   "description": "Build, lint, and sign tooling for the Vault Autofill Companion Firefox extension.",
   "scripts": {

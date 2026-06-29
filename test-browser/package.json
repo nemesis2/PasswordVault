@@ -1,0 +1,8 @@
+{
+  "name": "vault-browser-tests",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Playwright browser/DOM tests for the password vault PWA (dev-only).",
+  "scripts": { "test": "node test-browser.js" },
+  "dependencies": { "playwright": "^1.48.0" }
+}

@@ -21,6 +21,7 @@ FILES=(
   background.js
   offscreen.html
   offscreen.js
+  vault-session.js
   crypto-vault.js
   crypto-ciphers.js
   webauthn.js

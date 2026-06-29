@@ -20,12 +20,12 @@ contexts:
 
 | Context | File(s) | Responsibility |
 |---|---|---|
-| **Offscreen document** (persistent) | `offscreen.html` / `offscreen.js` | Holds the unlocked **session** (decrypted entries) in memory, runs the **Argon2id Web Worker pool** (`crypto-vault.js` + `argon2-worker.js`), parses the vault `index.html` with **DOMParser**, computes TOTP, and wipes the **clipboard**. This is the MV3 stand-in for Firefox's persistent background page — created once and kept alive, so the session survives the popup *and* the service worker closing. |
+| **Offscreen document** (persistent) | `offscreen.html` / `offscreen.js` + `vault-session.js` | Holds the unlocked **session** (decrypted entries) in memory, runs the **Argon2id Web Worker pool** (`crypto-vault.js` + `argon2-worker.js`), parses the vault `index.html` with **DOMParser**, computes TOTP, and wipes the **clipboard**. This is the MV3 stand-in for Firefox's persistent background page — created once and kept alive, so the session survives the popup *and* the service worker closing. The session/crypto/passkey core lives in **`vault-session.js`** (shared **byte-for-byte** with the Firefox background page); `offscreen.js` is the thin host that supplies the message handler + the `unlock`/`lock`/`_progress` wrappers. |
 | **Service worker** | `background.js` | Owns the chrome.* UI APIs the offscreen page can't touch: the toolbar **action icon/badge** (drawn with `OffscreenCanvas`), **idle** auto-lock, **tabs + scripting** (autofill injection), and **routing** popup commands to the offscreen document. Mirrors the lock state in `chrome.storage.session` so the icon/badges are correct after a service-worker respawn. |
 | **Popup** | `popup.html` / `popup.js` / `popup.css` | Unchanged from Firefox — sends plain messages to the service worker and renders results. |
 | **Content script** | `content.js` | Unchanged from Firefox — injected on demand to fill credentials, with a per-frame origin gate. |
 | **Passkey interceptor** | `content_passkey_main.js` (MAIN world) + `content_passkey_bridge.js` (ISOLATED) | Overrides `navigator.credentials.create/get` on every site. MAIN world replaces the API (no `chrome.*` there); the ISOLATED bridge relays requests to the service worker over a long-lived port. **Conditional/silent `get()`** (passkey autofill) and RP requests for a **cross-platform** authenticator pass straight through to the browser's native handling — they never raise extension UI. |
-| **Passkey crypto** | `webauthn.js` + `crypto-vault.js` | ECDSA P-256 keygen/signing, the encrypt path that writes passkey records, and the WebAuthn byte builders (CBOR COSE key, attestationObject, authenticatorData, DER signatures). Runs in the offscreen document. |
+| **Passkey crypto** | `webauthn.js` + `crypto-vault.js` + `vault-session.js` | ECDSA P-256 keygen/signing, the encrypt path that writes passkey records, the WebAuthn byte builders (CBOR COSE key, attestationObject, authenticatorData, DER signatures), and the create/get/precheck ceremonies + manifest re-sign (`vault-session.js`). Runs in the offscreen document. |
 | **Approval window** | `approve.html` / `approve.js` | Per-ceremony prompt that always shows the **validated requesting origin** (not just the RP-supplied name). Creating a passkey asks for the two master passwords (to encrypt) + the vault write password (to POST), and offers **Use this device instead** (fall back to the browser's native authenticator instead of failing the ceremony). Once both master passwords are entered it **unlocks the vault and lists existing entries** so the passkey can be **attached to one** (site-matching entries first) instead of always creating a new entry — default is **Create new entry**. Using a passkey requires a per-assertion **confirm** (the WebAuthn user-presence gesture) even when the vault is unlocked; if it's locked, the prompt asks for the master passwords to unlock first. Nothing is persisted. |
 
 Passkeys are stored as normal encrypted vault entries (`url: passkey://<rpId>`, the
@@ -56,8 +56,9 @@ This keeps full multi-core Argon2id parallelism (Approach B in
   compositing uses `OffscreenCanvas` + `createImageBitmap` instead of
   `new Image()` + `<canvas>`; `browserAction.*` → `action.*`;
   `tabs.executeScript` → `chrome.scripting.executeScript`.
-- `offscreen.html` / `offscreen.js`: **new** — the session/crypto half lifted
-  out of the Firefox `background.js`, with DOMParser and the worker pool intact.
+- `offscreen.html` / `offscreen.js`: **new** — the host for the session/crypto
+  half, with DOMParser and the worker pool intact. The session core itself is
+  `vault-session.js`, shared byte-for-byte with the Firefox background page.
 
 Everything else (`crypto-ciphers.js`, `crypto-vault.js`, `argon2-worker.js`,
 `content.js`, `popup.*`, `icons/`, `selftest.js`) is copied byte-for-byte from

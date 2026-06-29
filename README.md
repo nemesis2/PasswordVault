@@ -4,9 +4,6 @@ A self-hosted, zero-knowledge password manager that runs entirely in your browse
 
 No accounts, no cloud, no database server, no runtime dependencies fetched from a CDN. One directory, one flat file, and your choice of backend — a single PHP script or the bundled dependency-free Node server ([`server.js`](#running-without-php-standalone-node-server)). [MIT-licensed](LICENSE).
 
-Full disclosure: This originally started a simple custom built/hacked together AES vault that the author used for years.  
-Then Claude was used to audit the code and slowly expand it.  
-
 ---
 
 ## Screen Shots
@@ -412,6 +409,7 @@ Hover any button or interactive field for a brief description of what it does.
 | `post.php` | The PHP server-side code: validates, locks, backs up, writes, and rebuilds the page |
 | `server.js` | Optional **standalone Node server** — a byte-faithful, dependency-free port of `post.php` + the web-server config, with `local`/`web` modes ([*Running without PHP*](#running-without-php-standalone-node-server)) |
 | `parity-test.js` | Proves `server.js` is byte-identical to `post.php` (`node parity-test.js`, needs `php`) |
+| `run-tests.sh` / `test-*.js` / `test-browser/` | The automated test suite — client crypto/logic, server protocol + HTTP layer, extension selftests, browser E2E (Playwright), and parity. Run `./run-tests.sh` (see the script header for the per-suite breakdown) |
 | `manifest.json` / `icon.png` | PWA web-app manifest + icon, making the page installable |
 | `bak/` | Automatic pre-write backups of `lines` (newest 100 / younger than 60 days kept; override via `VAULT_BAK_KEEP` / `VAULT_BAK_MAX_AGE_DAYS`) |
 | `.htaccess` | Apache-only access rules and security headers (Node mode applies the same rules in `server.js`) |

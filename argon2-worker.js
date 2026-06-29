@@ -656,7 +656,7 @@ hash-wasm/dist/index.esm.js:
 // ── Argon2id Web Worker message handler ──────────────────────────────────────
 // Appended after the hash-wasm bundle (which exposes globalThis.argon2idHash —
 // in a worker globalThis === self) to produce the served `argon2-worker.js`.
-// See CLAUDE.md → "Argon2id Web Worker pool" for the build command.
+// See CONTRIBUTING.md → "Rebuilding the inlined cipher bundles" for the build command.
 //
 // Protocol: main thread posts { id, password:Uint8Array, salt:Uint8Array, opts }.
 // We hash and reply { id, hash:Uint8Array } (buffer transferred back), or
