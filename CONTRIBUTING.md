@@ -59,7 +59,7 @@ files afterward so php-fpm can still rewrite them.
    ```
    This runs the client crypto/logic, server protocol + HTTP-layer, extension
    selftest, browser E2E, and PHP-parity suites. After any change to `post.php`
-   *or* `server.js` the parity suite must report **12/12 byte-identical** (needs
+   *or* `server.js` the parity suite must report **13/13 byte-identical** (needs
    `php` on PATH). The browser suite needs a one-time
    `cd test-browser && npm install && npx playwright install chromium`. See the
    `run-tests.sh` header for the full per-suite breakdown.
@@ -104,4 +104,4 @@ committed.
 
 ## Roadmap
 
-Open ideas and their status are tracked in [suggestions.md](suggestions.md).
+Open ideas and their status are tracked in [SUGGESTIONS.md](SUGGESTIONS.md).

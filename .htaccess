@@ -4,9 +4,29 @@
     Require all denied
 </FilesMatch>
 
+# Block private-key / signed-package build artifacts (the Chrome extension's
+# .pem signing key must never be downloadable) and shell scripts (operator
+# tooling like regen.sh, not web assets).
+<FilesMatch "\.(pem|crx|xpi|sh)$">
+    Require all denied
+</FilesMatch>
+
+# Block ALL dotfiles and anything inside a dot-directory (.git, .claude/, …).
+# FilesMatch only sees basenames, so use RedirectMatch for the path form.
+<FilesMatch "^\.">
+    Require all denied
+</FilesMatch>
+<IfModule mod_alias.c>
+    RedirectMatch 403 "/\."
+</IfModule>
+
 # Apache 2.2 fallback
 <IfModule !mod_authz_core.c>
     <Files ~ "^(lines|trash|manifest|kdfparams|part1|part2)$">
+        Order allow,deny
+        Deny from all
+    </Files>
+    <Files ~ "\.(pem|crx|xpi|sh)$">
         Order allow,deny
         Deny from all
     </Files>
@@ -42,6 +62,11 @@
     # Cross-origin isolation: detach this browsing context from openers/embedders.
     Header always set Cross-Origin-Opener-Policy "same-origin"
     Header always set Cross-Origin-Resource-Policy "same-origin"
-    # Vault HTML embeds the ciphertext DB — keep it out of on-disk caches.
-    Header always set Cache-Control "no-store"
+    # Vault HTML embeds the ciphertext DB — keep it out of on-disk caches. Scoped
+    # to index.html only (matching server.js), so the non-secret code assets
+    # (javascript.js ~360 KB, argon2-worker.js) may cache instead of being
+    # re-downloaded on every load. index.html itself stays no-store.
+    <FilesMatch "^index\.html$">
+        Header always set Cache-Control "no-store"
+    </FilesMatch>
 </IfModule>

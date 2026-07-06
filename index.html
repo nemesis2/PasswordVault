@@ -476,7 +476,11 @@ body.wide-controls .ctrl-form #entry-count-row {
    flex item so ellipsis truncation still works. */
 .entry-grid .entry-btn { display: flex; align-items: center; gap: 8px; }
 .entry-grid .entry-lbl {
-  flex: 1; min-width: 0;
+  /* flex:0 1 auto (not 1): the label shrinks to its content so a trailing
+     modifier glyph hugs the name, and only ellipsizes when it must — the
+     glyph lives outside this box (see .entry-passkey/.entry-note below) so it
+     is never clipped. */
+  flex: 0 1 auto; min-width: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .entry-avatar {
@@ -634,6 +638,41 @@ body.wide-controls .ctrl-form #entry-count-row {
 }
 #charset { display: contents; }
 .gen-grid label { cursor: pointer; }
+
+/* Generator mode toggle (Characters / Passphrase) + passphrase option rows. */
+.gen-mode-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  color: var(--text-2);
+  font-size: 13px;
+}
+.gen-mode-row label { cursor: pointer; margin-right: 8px; }
+.gen-phrase {
+  display: flex;
+  flex-direction: column;
+  row-gap: 8px;
+  margin-bottom: 10px;
+  color: var(--text-2);
+  font-size: 13px;
+}
+.gen-phrase .pp-row { display: flex; align-items: center; gap: 8px; }
+.gen-phrase .pp-row > label:first-child { min-width: 78px; cursor: default; }
+.gen-phrase .pp-row label { cursor: pointer; }
+#word-sep {
+  width: 54px;
+  background: var(--elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  color: var(--text);
+  font-size: 13px;
+  font-family: var(--mono);
+  padding: 2px 6px;
+  outline: none;
+  text-align: center;
+}
+#word-sep:focus { border-color: var(--accent); }
 
 /* ─── Dark-theme checkboxes & radios ──────────────────────────
    Custom-drawn (appearance:none) so the box/border/fill all follow
@@ -1178,17 +1217,24 @@ input[type=radio]:disabled { opacity: .45; cursor: default; }
 .lib-table .lt-info a:hover { color: var(--accent-h); text-decoration: underline; }
 .standards-grid {
   display: grid;
-  grid-template-columns: max-content max-content 1fr;
+  grid-template-columns: minmax(0,1fr) max-content;
   column-gap: 10px;
   row-gap: 3px;
   margin-top: 6px;
   font-size: 12px;
   align-items: baseline;
 }
-.sg-name { font-family: var(--mono); color: var(--text); white-space: nowrap; }
-.sg-met { color: var(--green); font-weight: 600; white-space: nowrap; }
-.sg-partial { color: var(--warn); font-weight: 600; white-space: nowrap; }
-.sg-desc { color: var(--text-2); }
+.sg-name { grid-column: 1; font-family: var(--mono); color: var(--text); }
+.sg-met, .sg-partial { grid-column: 2; font-weight: 600; white-space: nowrap; }
+.sg-met { color: var(--green); }
+.sg-partial { color: var(--warn); }
+.sg-desc { grid-column: 1 / -1; color: var(--text-2); margin-bottom: 4px; }
+@media (min-width: 610px) {
+  .standards-grid { grid-template-columns: max-content max-content 1fr; }
+  .sg-name { grid-column: auto; white-space: nowrap; }
+  .sg-met, .sg-partial { grid-column: auto; }
+  .sg-desc { grid-column: auto; margin-bottom: 0; }
+}
 .about-section code {
   font-family: var(--mono);
   font-size: 11px;
@@ -1314,8 +1360,18 @@ input[type=radio]:disabled { opacity: .45; cursor: default; }
 .fav-btn:hover    { color: var(--warn); background: rgba(var(--warn-rgb),.1); }
 .fav-btn.is-fav   { color: var(--warn); }
 .entry-btn.entry-fav::before { content: '\2605'; color: var(--warn); margin-right: 5px; }
-.entry-btn.entry-passkey .entry-lbl::after { content: '\1F510\FE0E'; margin-left: 6px; opacity: .85; }
-.entry-btn.entry-note .entry-lbl::after { content: '\1F4DD\FE0E'; margin-left: 6px; opacity: .8; }
+/* Trailing modifier glyphs live on the button (a flex item), NOT inside
+   .entry-lbl — the label truncates with an ellipsis, so a glyph nested in it
+   would be clipped on long names. flex:0 0 auto keeps them full-size; the 8px
+   grid gap spaces them off the name. (In select mode .entry-selected::after —
+   defined later, so it wins — replaces this glyph with the ✓ checkmark.) */
+.entry-btn.entry-passkey::after { content: '\1F510\FE0E'; flex: 0 0 auto; opacity: .85; }
+.entry-btn.entry-note::after    { content: '\1F4DD\FE0E'; flex: 0 0 auto; opacity: .8; }
+/* Stale (password unchanged > 1 year): ⏳ before the name. Stays on
+   .entry-lbl::before — it's a leading glyph, so the ellipsis (which truncates
+   the tail) never clips it, and both button pseudo-slots are taken (::before by
+   .entry-fav, ::after by passkey/note). A stale entry can also be a passkey. */
+.entry-btn.entry-stale .entry-lbl::before { content: '\23F3\FE0E'; margin-right: 6px; opacity: .8; }
 
 /* ─── Entry type toggle (entry form) ──────────────────────── */
 .type-toggle { display: flex; gap: 6px; flex: 1; min-width: 0; }
@@ -1960,7 +2016,14 @@ kbd {
   <div id="passwordSettings" class="gen-card" style="display:none">
     <div class="gen-title">Generator Settings</div>
 
-    <div class="gen-grid">
+    <div class="gen-mode-row">
+      <input type="radio" name="gen-mode" id="gen-mode-chars" data-action="set-gen-mode" checked/>
+      <label for="gen-mode-chars">Characters</label>
+      <input type="radio" name="gen-mode" id="gen-mode-phrase" data-action="set-gen-mode"/>
+      <label for="gen-mode-phrase">Passphrase</label>
+    </div>
+
+    <div id="gen-chars" class="gen-grid">
       <div id="charset"></div>
       <input type="checkbox" id="custom"/>
       <label for="custom">Custom chars:</label>
@@ -1979,6 +2042,30 @@ kbd {
         <input type="number" min="0" value="128" step="any" id="entropy"
                data-check-on-input="by-entropy"/>
         <span>bits</span>
+      </div>
+    </div>
+
+    <div id="gen-phrase" class="gen-phrase" style="display:none">
+      <div class="pp-row">
+        <label for="word-count">Words</label>
+        <div class="val-cell">
+          <input type="number" min="3" max="40" value="6" step="1" id="word-count"/>
+          <span>words</span>
+        </div>
+      </div>
+      <div class="pp-row">
+        <label for="word-sep">Separator</label>
+        <div class="val-cell">
+          <input type="text" id="word-sep" value="-" maxlength="5" placeholder="-"/>
+        </div>
+      </div>
+      <div class="pp-row">
+        <input type="checkbox" id="word-caps"/>
+        <label for="word-caps">Capitalize each word</label>
+      </div>
+      <div class="pp-row">
+        <input type="checkbox" id="word-num"/>
+        <label for="word-num">Append a random digit</label>
       </div>
     </div>
 
@@ -2038,8 +2125,8 @@ kbd {
       <div class="about-section">
         <h3>&#x2139;&#xFE0E; Description</h3>
         <p>Self-hosted, client-side encrypted password manager served by a <strong>PHP-capable web server</strong> — or, with no PHP at all, by the bundled standalone <strong>Node.js server</strong> (<code>server.js</code>). All encryption and decryption happens entirely in your browser using the <strong>WebCrypto API</strong> — the server only stores and serves ciphertext and never sees your plaintext passwords.</p>
-        <p style="margin-top:4px">Open source, released under the <a href="https://opensource.org/license/mit" target="_blank" rel="noopener">MIT License</a>.</p>
-        <p style="margin-top:4px; color:var(--text-2); font-size:.85em;">Version <a id="about-version" href="https://github.com/nemesis2/PasswordVault" target="_blank" rel="noopener">1.1.6</a></p>
+        <p style="margin-top:4px">Open source, released under the <a href="https://opensource.org/license/mit" target="_blank" rel="noopener" data-tip="Open in New Window/Tab: https://opensource.org/license/mit">MIT License</a>.</p>
+        <p style="margin-top:4px; color:var(--text-2); font-size:.85em;">Version <a id="about-version" href="https://github.com/nemesis2/PasswordVault" target="_blank" rel="noopener" data-tip="Open in New Window/Tab: https://github.com/nemesis2/PasswordVault">1.1.11</a></p>
       </div>
 
       <div class="about-section" id="about-vault-tools">
@@ -2198,7 +2285,7 @@ kbd {
         <p>Click any entry to fill the display panel at the top with its decrypted fields. The <strong>Username</strong>, <strong>2FA token</strong>, and <strong>Password</strong> rows are <strong>click-to-copy</strong> &mdash; click anywhere on the row to copy that field to the clipboard. A brief flash confirms the copy.</p>
         <p style="margin-top:6px">Each copyable row carries a dimmed <strong>&#x29C9;&#xFE0E; copy glyph</strong> on its right edge that brightens when you hover the row, marking it as copyable at a glance. The glyph is only a visual cue &mdash; the whole row is the click target, so copying works the same on touch screens where there is no hover.</p>
         <p style="margin-top:6px">A copied secret is <strong>auto-cleared from the clipboard after 45 seconds</strong>, and immediately on any lock, so it never lingers there.</p>
-        <p style="margin-top:6px"><strong>Custom fields</strong> appear as their own click-to-copy rows; any marked <em>secret</em> show masked (&bull;&bull;&bull;&bull;) but still copy on click. If the entry has <strong>password history</strong>, a collapsible <strong>&#x23F1;&#xFE0E; Password history</strong> row lists previously used passwords (each with the date it was replaced), also click-to-copy.</p>
+        <p style="margin-top:6px"><strong>Custom fields</strong> appear as their own click-to-copy rows; any marked <em>secret</em> show masked (&bull;&bull;&bull;&bull;) but still copy on click. If the entry has <strong>password history</strong>, a collapsible <strong>&#x23F1;&#xFE0E; Password history</strong> row lists previously used passwords (each with the date it was replaced, newest 20 kept), also click-to-copy.</p>
         <p style="margin-top:6px">Next to the password, a <strong>&#x1F4DD;&#xFE0E; Modified</strong> column shows the date the password was last changed &mdash; or the creation date, if it never has. Hover it for a tooltip with the entry's <strong>creation date</strong> and <strong>age</strong>. Entries saved before this tracking existed show a best-effort creation date (prefixed &ldquo;&le;&rdquo;) inferred from the oldest password-history entry, or the modified date if there is no history &mdash; both are upper bounds on the true creation time.</p>
       </div>
       
@@ -2208,6 +2295,7 @@ kbd {
         <table class="ks-table">
           <tr><td class="ks-key"><kbd>Shift</kbd> <kbd>Enter</kbd></td><td class="ks-desc">Save the entry being added or edited (from any field in the form &mdash; except <strong>Notes</strong>, where it inserts a newline)</td></tr>
           <tr><td class="ks-key"><kbd>Ctrl</kbd> <kbd>K</kbd> / <kbd>?</kbd></td><td class="ks-desc">Open / close the command palette &mdash; fuzzy search, jump, copy, edit, and <code>&gt;</code> commands (see <em>Command palette</em> below)</td></tr>
+          <tr><td class="ks-key"><kbd>Ctrl</kbd> <kbd>C</kbd> / <kbd>Ctrl</kbd> <kbd>U</kbd> / <kbd>Ctrl</kbd> <kbd>E</kbd></td><td class="ks-desc">In the palette, on the highlighted entry: copy password / copy username / edit (<kbd>&#x2318;</kbd> on a Mac)</td></tr>
           <tr><td class="ks-key"><kbd>N</kbd></td><td class="ks-desc">New entry (when the &#xff0b; New button is enabled)</td></tr>
           <tr><td class="ks-key"><kbd>E</kbd></td><td class="ks-desc">Edit the selected entry (when one is displayed)</td></tr>
           <tr><td class="ks-key"><kbd>Shift</kbd> <kbd>D</kbd></td><td class="ks-desc">Delete the selected entry, with confirmation (when one is displayed)</td></tr>
@@ -2240,12 +2328,14 @@ kbd {
         <p style="margin-top:8px"><strong>Signature construction</strong></p>
         <table class="cr-table" style="margin-top:4px">
           <tr><td class="cr-name">Vault key</td><td class="cr-desc">HKDF-SHA-256 over <code>Argon2id(pw1, salt1) ‖ Argon2id(pw2, salt2)</code>, info <code>v6|manifest|hmac</code> — independent of every per-record key</td></tr>
-          <tr><td class="cr-name">Signed data</td><td class="cr-desc">Header fields (format, salts, revision, timestamp) + every record joined in canonical server order</td></tr>
+          <tr><td class="cr-name">Signed data</td><td class="cr-desc">Header fields (format, salts, revision, timestamp, kdf cost) + every record joined in canonical server order</td></tr>
           <tr><td class="cr-name">Algorithm</td><td class="cr-desc">HMAC-SHA-256 via WebCrypto</td></tr>
           <tr><td class="cr-name">Revision</td><td class="cr-desc">Monotonic counter incremented on every sign; each device remembers the highest revision it has seen, so a validly signed but older copy of the vault raises a <strong>rollback</strong> alert</td></tr>
+          <tr><td class="cr-name">KDF binding</td><td class="cr-desc">The active Argon2id cost (<code>a2id|m|t|p</code>) is signed alongside the record set, so a server that swaps in a weaker cost is caught by comparing the manifest's declared cost against the served one, rather than merely making every record fail to decrypt</td></tr>
         </table>
         <p style="margin-top:8px"><strong>Manifest format</strong> (stored server-side, embedded in the served page):</p>
-        <pre style="font-size:11px;margin-top:4px;padding:8px;background:var(--bg);border:1px solid var(--border);border-radius:var(--r);overflow-x:auto">vm1 | salt1 | salt2 | revision | timestamp | hmac</pre>
+        <pre style="font-size:11px;margin-top:4px;padding:8px;background:var(--bg);border:1px solid var(--border);border-radius:var(--r);overflow-x:auto">vm2 | salt1 | salt2 | revision | timestamp | kdf | hmac   (current)
+vm1 | salt1 | salt2 | revision | timestamp | hmac          (legacy, still verified; upgraded to vm2 on next write)</pre>
         <p style="margin-top:8px"><strong>Limits:</strong> this is tamper <em>detection</em> for the data file. It guards against corruption, botched restores, and manual-edit mistakes. It cannot defend against an adversary who can also rewrite the served JavaScript — no in-band scheme can.</p>
       </div>
 
@@ -2349,7 +2439,7 @@ kbd {
           <tr><td style="color:#a878ff;font-family:var(--mono);padding:1px 8px 1px 0">Exceptional</td><td style="color:var(--text-2)">160 – 199 bits</td></tr>
           <tr><td style="color:#ff5cc8;font-family:var(--mono);padding:1px 8px 1px 0">Paranoid</td><td style="color:var(--text-2)">&ge; 200 bits</td></tr>
         </table>
-        <p style="margin-top:8px">The two <strong>master password</strong> fields share a second bar that scores their <em>combined</em> strength (using higher thresholds, since two independent passwords should together be harder to guess than one entry password). If the combined score falls under the lowest tier, the <strong>＋ New</strong> button is disabled and reads <strong>Too Weak</strong> until a stronger pair is entered. The same combined scoring drives the strength bar in <strong>Change Passwords</strong>.</p>
+        <p style="margin-top:8px">The two <strong>master password</strong> fields share a second bar that scores their <em>combined</em> strength &mdash; the sum of both passwords' estimated bits against tiers deliberately compressed below the single-field ones (45 / 80 / 115 / 150 / 185 bits), since the per-password estimate already runs high for dictionary-like input and Argon2id's cost is treated as margin rather than credited bits. If the combined score falls under the lowest tier, the <strong>＋ New</strong> button is disabled and reads <strong>Too Weak</strong> until a stronger pair is entered. The same combined scoring drives the strength bar in <strong>Change Passwords</strong>.</p>
       </div>
 
       <div class="about-section">
@@ -2360,7 +2450,7 @@ kbd {
       <div class="about-section">
         <h3>&#x231B;&#xFE0E; Auto-lock</h3>
         <p>After <strong>5 minutes</strong> of inactivity a 60-second warning appears. If not dismissed, all key fields and cached keys are cleared from memory.</p>
-        <p>This preference is remembered on this device and stays in effect across reloads and vault locks until you turn it back on.</p>
+        <p>The <strong>Disable auto-lock</strong> toggle below turns this off; the choice is remembered on this device and stays in effect across reloads and vault locks until you turn it back on. You can also toggle it with the <kbd>U</kbd> key while this panel is open.</p>
         <label class="about-check"><input type="checkbox" id="autolock-disable-toggle"/> Disable auto-lock (not recommended)</label>
       </div>
 
@@ -2371,27 +2461,27 @@ kbd {
           <tr>
             <td class="lt-pkg"><code>@noble/ciphers</code></td>
             <td class="lt-use">MIT<br><span class="lt-ver">Paul Miller</span></td>
-            <td class="lt-info">ChaCha20-Poly1305<br><a href="https://github.com/paulmillr/noble-ciphers" target="_blank" rel="noopener">github.com/paulmillr/noble-ciphers</a></td>
+            <td class="lt-info">ChaCha20-Poly1305<br><a href="https://github.com/paulmillr/noble-ciphers" target="_blank" rel="noopener" data-tip="Open in New Window/Tab: https://github.com/paulmillr/noble-ciphers">github.com/paulmillr/noble-ciphers</a></td>
           </tr>
           <tr>
             <td class="lt-pkg"><code>twofish-ts</code><br><span class="lt-ver">v1.0.2</span></td>
             <td class="lt-use">MIT<br><span class="lt-ver">Logan R. Kearsley</span></td>
-            <td class="lt-info">Twofish-256<br><a href="https://github.com/gliese1337/twofish" target="_blank" rel="noopener">github.com/gliese1337/twofish</a></td>
+            <td class="lt-info">Twofish-256<br><a href="https://github.com/gliese1337/twofish" target="_blank" rel="noopener" data-tip="Open in New Window/Tab: https://github.com/gliese1337/twofish">github.com/gliese1337/twofish</a></td>
           </tr>
           <tr>
             <td class="lt-pkg"><code>hash-wasm</code><br><span class="lt-ver">v4.12.0</span></td>
             <td class="lt-use">MIT<br><span class="lt-ver">Dani Bir&oacute;</span></td>
-            <td class="lt-info">Argon2id (WebAssembly)<br><a href="https://github.com/Daninet/hash-wasm" target="_blank" rel="noopener">github.com/Daninet/hash-wasm</a></td>
+            <td class="lt-info">Argon2id (WebAssembly)<br><a href="https://github.com/Daninet/hash-wasm" target="_blank" rel="noopener" data-tip="Open in New Window/Tab: https://github.com/Daninet/hash-wasm">github.com/Daninet/hash-wasm</a></td>
           </tr>
           <tr>
             <td class="lt-pkg"><code>Serpent-256</code></td>
             <td class="lt-use">Public domain</td>
-            <td class="lt-info">In-tree bitslice cipher (CTR), not from npm. Verified against <a href="https://www.bouncycastle.org/" target="_blank" rel="noopener">Bouncy Castle</a> 256-bit vectors; algorithm by <a href="https://www.cl.cam.ac.uk/~rja14/serpent.html" target="_blank" rel="noopener">Anderson, Biham &amp; Knudsen</a>.</td>
+            <td class="lt-info">In-tree bitslice cipher (CTR), not from npm. Verified against <a href="https://www.bouncycastle.org/" target="_blank" rel="noopener" data-tip="Open in New Window/Tab: https://www.bouncycastle.org/">Bouncy Castle</a> 256-bit vectors; algorithm by <a href="https://www.cl.cam.ac.uk/~rja14/serpent.html" target="_blank" rel="noopener" data-tip="Open in New Window/Tab: https://www.cl.cam.ac.uk/~rja14/serpent.html">Anderson, Biham &amp; Knudsen</a>.</td>
           </tr>
           <tr>
             <td class="lt-pkg"><code>esbuild</code></td>
             <td class="lt-use">MIT<br><span class="lt-ver">Evan Wallace</span></td>
-            <td class="lt-info">Build tooling only &mdash; not shipped to the browser.<br><a href="https://github.com/evanw/esbuild" target="_blank" rel="noopener">github.com/evanw/esbuild</a></td>
+            <td class="lt-info">Build tooling only &mdash; not shipped to the browser.<br><a href="https://github.com/evanw/esbuild" target="_blank" rel="noopener" data-tip="Open in New Window/Tab: https://github.com/evanw/esbuild">github.com/evanw/esbuild</a></td>
           </tr>
         </table>
       </div>
@@ -2401,23 +2491,75 @@ kbd {
         <div class="standards-grid">
           <span class="sg-name">Argon2 (RFC 9106)</span>
           <span class="sg-met">Met</span>
-          <span class="sg-desc">Argon2id key derivation &mdash; <span id="std-argon-params">m&nbsp;=&nbsp;128&nbsp;MiB, t&nbsp;=&nbsp;3, p&nbsp;=&nbsp;1</span> (vault-tunable; exceeds the RFC&nbsp;9106 second-recommended option), then HKDF-SHA-256 subkeys</span>
+          <span class="sg-desc">Argon2id key derivation &mdash; <span id="std-argon-params">m&nbsp;=&nbsp;128&nbsp;MiB, t&nbsp;=&nbsp;3, p&nbsp;=&nbsp;1</span> by default (exceeds the RFC&nbsp;9106 second-recommended option); tunable per vault up to m&nbsp;=&nbsp;1&nbsp;GiB, t&nbsp;=&nbsp;10, then HKDF-SHA-256 subkeys</span>
+
+          <span class="sg-name">HKDF (RFC 5869)</span>
+          <span class="sg-met">Met</span>
+          <span class="sg-desc">HKDF-SHA-256 expands the Argon2id master key into distinct per-record, per-purpose subkeys (separate <code>info</code> labels for name vs. payload AES keys)</span>
+
+          <span class="sg-name">AES-GCM (NIST SP 800-38D)</span>
+          <span class="sg-met">Met</span>
+          <span class="sg-desc">AES-256-GCM authenticated encryption (WebCrypto) for v6 record names and payloads; per-record random nonces</span>
+
+          <span class="sg-name">HMAC (RFC 2104 / FIPS 198-1)</span>
+          <span class="sg-met">Met</span>
+          <span class="sg-desc">HMAC-SHA-256 for the <code>vm2</code> vault integrity manifest; HMAC-SHA-1/256/512 for TOTP &mdash; both via WebCrypto</span>
+
+          <span class="sg-name">AES / SHA-2 (FIPS 197 / 180-4)</span>
+          <span class="sg-met">Met</span>
+          <span class="sg-desc">AES and the SHA-2 family are used through the platform WebCrypto implementation; not run in a FIPS-validated module</span>
 
           <span class="sg-name">RFC 6238 / 4226</span>
           <span class="sg-met">Met</span>
           <span class="sg-desc">TOTP &mdash; configurable period and digit count, SHA-1/256/512, plus Steam&nbsp;Guard codes (defaults: 30-second window, 6 digits, SHA-1)</span>
 
+          <span class="sg-name">otpauth:// Key URI Format</span>
+          <span class="sg-met">Met</span>
+          <span class="sg-desc"><code>_parseOtp</code> reads the de-facto Google Authenticator URI for secret, digits, period, algorithm, issuer/label and Steam detection; QR import preserves the full URI when it carries non-default params</span>
+
+          <span class="sg-name">Base32 / Base64 (RFC 4648)</span>
+          <span class="sg-met">Met</span>
+          <span class="sg-desc">Base32 decoding of TOTP secrets (<code>base32ToBytes</code>); Base64 for ciphertext/binary transport</span>
+
+          <span class="sg-name">WebAuthn L2 / FIDO2 (W3C / CTAP)</span>
+          <span class="sg-met">Met (extensions)</span>
+          <span class="sg-desc">Passkeys: ECDSA P-256 key pairs, COSE-encoded public keys, JWK (RFC 7517) serialization, <code>navigator.credentials.create/get</code> interception in the Firefox/Chrome extensions; the PWA only displays and deletes stored passkeys</span>
+
+          <span class="sg-name">HTTP Basic Auth (RFC 7617)</span>
+          <span class="sg-met">Met</span>
+          <span class="sg-desc">Write operations gated by Basic Auth (<code>WWW-Authenticate: Basic realm="Password Vault", charset="UTF-8"</code>), constant-time credential compare; meaningful only over TLS</span>
+
+          <span class="sg-name">HSTS (RFC 6797)</span>
+          <span class="sg-met">Met</span>
+          <span class="sg-desc"><code>Strict-Transport-Security: max-age=63072000</code> (two years) on Apache and on <code>server.js</code> in <code>web</code> mode</span>
+
+          <span class="sg-name">CSV (RFC 4180)</span>
+          <span class="sg-met">Met</span>
+          <span class="sg-desc">RFC-4180 parser/writer (<code>_csvParse</code>/<code>_csvField</code>) for plaintext import/export interop with other password managers (header aliases for Bitwarden/Chrome/KeePass/1Password)</span>
+
+          <span class="sg-name">PWA (W3C Web App Manifest / Service Workers)</span>
+          <span class="sg-met">Met</span>
+          <span class="sg-desc">Installable web app via <code>manifest.json</code> and <code>sw.js</code>; the service worker caches only non-secret code assets and never the vault document</span>
+
+          <span class="sg-name">NIST SP 800-63B (memorized secrets)</span>
+          <span class="sg-partial">Partial</span>
+          <span class="sg-desc">Allows long passphrases, no forced composition rules, no mandatory rotation/expiry; has a length/charset strength meter but <strong>no</strong> breached-password blocklist check (the <code>connect-src 'self'</code> CSP forbids the outbound calls a HIBP-style check would need)</span>
+
           <span class="sg-name">OWASP ASVS L1/L2</span>
           <span class="sg-met">Met</span>
-          <span class="sg-desc">Client-side crypto, CSRF protection, Basic-Auth rate limiting, full header suite (CSP, HSTS, COOP/CORP, Permissions-Policy)</span>
+          <span class="sg-desc">Client-side crypto, CSRF protection, Basic-Auth rate limiting, full security-header suite (CSP, HSTS, COOP/CORP, Permissions-Policy)</span>
 
           <span class="sg-name">OWASP ASVS L3</span>
           <span class="sg-partial">Partial</span>
-          <span class="sg-desc"><code>style-src 'unsafe-inline'</code> still required by inline <code>style</code> attributes; <code>script-src</code> is <code>'self' 'wasm-unsafe-eval'</code> (the latter only to compile the Argon2id WASM). Key derivation is memory-hard Argon2id</span>
+          <span class="sg-desc"><code>style-src 'unsafe-inline'</code> still required by inline <code>style</code> attributes; <code>script-src</code> is <code>'self' 'wasm-unsafe-eval'</code> (latter only to compile the Argon2id WASM). Key derivation is memory-hard Argon2id</span>
+
+          <span class="sg-name">OWASP Secure Headers</span>
+          <span class="sg-met">Met</span>
+          <span class="sg-desc">CSP, HSTS, <code>X-Content-Type-Options</code>, <code>Referrer-Policy</code>, <code>Permissions-Policy</code>, COOP/CORP all set</span>
 
           <span class="sg-name">FIPS 140</span>
           <span class="sg-partial">Partial</span>
-          <span class="sg-desc">AES-256-GCM and HKDF-SHA-256 are approved; ChaCha20, Twofish, Serpent and Argon2id are not</span>
+          <span class="sg-desc">AES-256-GCM and HKDF-SHA-256 are FIPS-approved; ChaCha20, Twofish, Serpent and Argon2id are not</span>
         </div>
       </div>
 

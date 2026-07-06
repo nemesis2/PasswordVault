@@ -12,6 +12,7 @@ const sandbox = {
   TextEncoder,
   TextDecoder,
   console,
+  URL,
   btoa: (s) => Buffer.from(s, "binary").toString("base64"),
   atob: (s) => Buffer.from(s, "base64").toString("binary"),
 };
@@ -22,6 +23,7 @@ vm.createContext(sandbox);
 vm.runInContext(fs.readFileSync(__dirname + "/crypto-ciphers.js", "utf8"), sandbox, { filename: "crypto-ciphers.js" });
 vm.runInContext(fs.readFileSync(__dirname + "/crypto-vault.js", "utf8"), sandbox, { filename: "crypto-vault.js" });
 vm.runInContext(fs.readFileSync(__dirname + "/webauthn.js", "utf8"), sandbox, { filename: "webauthn.js" });
+vm.runInContext(fs.readFileSync(__dirname + "/vault-session.js", "utf8"), sandbox, { filename: "vault-session.js" });
 
 const TE = new TextEncoder();
 const hex = sandbox.VaultCrypto.bytesToHex;
@@ -181,6 +183,60 @@ async function buildRecord(pw, pw2, name, fields) {
   const attData = await WA.authenticatorData("example.com", 0x45, 0, WA.attestedCredentialData(kp.credentialId, cose));
   const attObj = WA.attestationObject(attData);
   check(cose.length > 0 && attObj.length > attData.length, "CBOR COSE key + attestationObject built");
+
+  // 8. hostname matcher (vault-session.js) — drives which entries the popup
+  // offers to autofill on the current tab.
+  const VS = sandbox;
+  check(VS._hostMatch("https://login.example.com/", "example.com"), "hostMatch: subdomain entry vs parent tab host");
+  check(VS._hostMatch("https://example.com/", "login.example.com"), "hostMatch: parent entry vs subdomain tab host");
+  check(VS._hostMatch("https://www.example.com/", "example.com"), "hostMatch: leading www stripped");
+  check(!VS._hostMatch("https://example.com/", "other.com"), "hostMatch: unrelated hosts rejected");
+  check(!VS._hostMatch("https://github.io/", "evil.github.io"), "hostMatch: public-suffix guard blocks cross-tenant match");
+  check(!VS._hostMatch("", "example.com"), "hostMatch: empty entry url rejected");
+
+  // 9. WebAuthn rpId allow-list — the security boundary stopping a page from
+  // requesting a credential/assertion scoped to a different site.
+  check(VS._rpIdAllowed("example.com", "https://example.com"), "rpIdAllowed: exact match");
+  check(VS._rpIdAllowed("example.com", "https://login.example.com"), "rpIdAllowed: registrable parent of origin host");
+  check(!VS._rpIdAllowed("example.com", "https://other.com"), "rpIdAllowed: unrelated origin rejected");
+  check(!VS._rpIdAllowed("com", "https://example.com"), "rpIdAllowed: bare TLD rejected");
+  check(!VS._rpIdAllowed("github.io", "https://evil.github.io"), "rpIdAllowed: public-suffix parent rejected");
+  check(!VS._rpIdAllowed("", "https://example.com"), "rpIdAllowed: empty rpId rejected");
+
+  // 10. canonical record ordering — must match javascript.js's canonicalization
+  // and the server's expect_hash, or a post-409 re-sign signs the wrong set.
+  const recA = ["aaa", "v6", "s1", "s2", "n1", "n2", "iv1", "n3", "n4", "n5", "ct", "3"].join("|");
+  const recB = ["zzz", "v6", "s1", "s2", "n1", "n2", "iv1", "n3", "n4", "n5", "ct", "7"].join("|");
+  const canon = VS._canonicalRecordsFrom([recB, recA]);
+  check(
+    canon.length === 2 && canon[0].split("|").length === 11 &&
+    canon[0].startsWith("aaa|") && canon[1].startsWith("zzz|"),
+    "canonicalRecordsFrom strips trailing index + sorts"
+  );
+
+  // 11. next entry id — never reuses an id already present, even with gaps left
+  // by records skipped during unlock.
+  VS.SESSION.entries = [{ id: 0 }, { id: 2 }, { id: 5 }];
+  check(VS._nextEntryId() === 6, "nextEntryId: strictly greater than every existing id");
+  VS.SESSION.entries = [];
+  check(VS._nextEntryId() === 0, "nextEntryId: 0 for an empty session");
+
+  // 12. passkey lookup + precheck — drives the popup's "sign now" vs "unlock
+  // first" decision and passkeyGet's passthrough-to-native-authenticator fallback.
+  VS.SESSION.unlocked = false;
+  let pc = VS.passkeyPrecheck({ options: { rpId: "example.com" }, origin: "https://example.com" });
+  check(pc.unlocked === false && pc.match === false, "passkeyPrecheck: locked session reports no match");
+
+  VS.SESSION.unlocked = true;
+  VS.SESSION.entries = [{ id: 0, passkey: { rpId: "example.com", credentialId: "cred-abc" } }];
+  pc = VS.passkeyPrecheck({ options: { rpId: "example.com" }, origin: "https://example.com" });
+  check(pc.unlocked === true && pc.match === true, "passkeyPrecheck: matches stored passkey by rpId");
+
+  pc = VS.passkeyPrecheck({ options: { rpId: "example.com", allowCredentials: [{ id: "other-cred" }] }, origin: "https://example.com" });
+  check(pc.match === false, "passkeyPrecheck: allowCredentials filter excludes non-matching credential id");
+
+  pc = VS.passkeyPrecheck({ options: { rpId: "other.com" }, origin: "https://other.com" });
+  check(pc.match === false, "passkeyPrecheck: different rpId does not match");
 
   console.log(pass ? "\nALL PASS" : "\nFAILED");
   process.exit(pass ? 0 : 1);

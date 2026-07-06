@@ -81,10 +81,16 @@ function main() {
     {
         const m = `vm1|${rh(64)}|${rh(64)}|7|1750000000|${rh(64)}`;
         check('accepts a well-formed vm1', srv.isValidManifest(m));
-        check('rejects wrong tag', !srv.isValidManifest(m.replace('vm1', 'vm2')));
         check('rejects short salt', !srv.isValidManifest(`vm1|${rh(62)}|${rh(64)}|7|1750000000|${rh(64)}`));
         check('rejects non-digit revision', !srv.isValidManifest(`vm1|${rh(64)}|${rh(64)}|x|1750000000|${rh(64)}`));
         check('rejects >512 bytes', !srv.isValidManifest('vm1|' + 'a'.repeat(600)));
+        check('rejects unknown tag', !srv.isValidManifest(`vm3|${rh(64)}|${rh(64)}|7|1750000000|${rh(64)}`));
+        // vm2 binds the kdf ("a2id|m|t|p"), which is itself 4 pipe fields → 10 total.
+        const m2 = `vm2|${rh(64)}|${rh(64)}|7|1750000000|a2id|262144|4|1|${rh(64)}`;
+        check('accepts a well-formed vm2', srv.isValidManifest(m2));
+        check('rejects vm2 with out-of-bounds kdf', !srv.isValidManifest(`vm2|${rh(64)}|${rh(64)}|7|1750000000|a2id|99|4|1|${rh(64)}`));
+        check('rejects vm2 with wrong field count', !srv.isValidManifest(`vm2|${rh(64)}|${rh(64)}|7|1750000000|${rh(64)}`));
+        check('rejects vm2 with short hmac', !srv.isValidManifest(`vm2|${rh(64)}|${rh(64)}|7|1750000000|a2id|262144|4|1|${rh(62)}`));
     }
 
     // -------------------------------------------------------------------------

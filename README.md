@@ -4,8 +4,8 @@ A self-hosted, zero-knowledge password manager that runs entirely in your browse
 
 No accounts, no cloud, no database server, no runtime dependencies fetched from a CDN. One directory, one flat file, and your choice of backend — a single PHP script or the bundled dependency-free Node server ([`server.js`](#running-without-php-standalone-node-server)). [MIT-licensed](LICENSE).
 
-Full disclosure: This originally started a simple custom built/hacked together AES vault that the author used for years.  
-Then Claude was used to audit the code and slowly expand it.  
+Full disclosure: This originally started a simple custom built/hacked together AES vault that the author used for years.
+Then Claude was used to audit the code and slowly expand it.
 
 ---
 
@@ -182,6 +182,21 @@ No build step and no `npm install` — pure Node ≥ 18 (WebCrypto is built in).
 
 ---
 
+## First-run onboarding
+
+The first time you open a freshly deployed vault the entry grid is empty and the two key fields at the top are waiting. There is **no separate sign-up or "set master password" step** — the vault has no account and stores no password verifier. Instead, the two passwords you use to save your **first entry** *become* the vault's keys: every later entry is encrypted under that same pair, and unlocking always requires both. Get this first run right and the rest of the guide is just day-to-day use.
+
+1. **Pick your two master passwords.** Type a **Primary** and a **Secondary** key (see [*Unlocking*](#unlocking) for what each protects). Make them **two different, strong passwords** — the [vault-key strength bar](#unlocking) shows their combined entropy as you type, and while the total stays under **45 bits** the **＋ New** button reads **"Too Weak"** and adding is blocked. Aim for *Strong* or better.
+2. **Write them down somewhere safe first.** They are never sent to the server and never stored anywhere — there is **no reset and no recovery**. If you lose either one, the vault is unreadable. Record them in another password manager or a sealed offline note *before* you create any entries.
+3. **Add your first entry.** Click **＋ New**, fill in the form (name, URL, username, password — or switch the type to a *secure note*), and **Save**. On this first write the browser prompts for the vault's **write credentials** — the HTTP Basic-Auth `VAULT_AUTH_USER` / `VAULT_AUTH_PASS` you set in [*Quick start*](#quick-start). These gate every add/edit/delete; *reading* the page needs no login. A wrong credential returns `401` and nothing is written.
+4. **Confirm the vault signed itself.** That first save also creates and signs the [integrity manifest](#vault-integrity-manifest); the status line above the list should turn to **✓ Integrity verified** with revision 1. From now on every write re-signs it, and every unlock checks it.
+5. **Test the unlock loop before you trust it.** [Lock](#locking) the vault (or reload the page), then re-enter **both** passwords and tab away from the second field. Your entry name should decrypt and reappear. This proves you recorded the exact passwords — do it now, while you still only have one entry to lose.
+6. **Keep the keys consistent.** Because the passwords aren't stored, there is nothing stopping you from typing a *different* pair when adding a later entry — but that entry would be encrypted under the new pair and wouldn't reveal alongside the others. Always unlock with the same two passwords you used on day one. To rotate them deliberately later, use *Vault Tools → Change Passwords*, which re-encrypts the whole vault at once (see [*Vault tools*](#vault-tools)).
+
+> ⚠️ The vault is only as recoverable as your backups. The encrypted database lives in `lines` (with copies in `bak/`); see [*Data safety & concurrency*](#data-safety--concurrency). Losing both master passwords cannot be undone by any backup — the backups are ciphertext too.
+
+---
+
 ## User guide
 
 ### Unlocking
@@ -311,6 +326,8 @@ A separate **⚙ Change KDF Parameters** section directly below Vault Tools adju
 
 The encrypted KeePass `.kdbx` binary is intentionally **not** supported — its format requires a full binary-crypto parser that can't be loaded under the page's strict CSP. Export to KeePass XML or CSV first.
 
+**Migrating out** is the reverse: **⬇ Export CSV** writes every entry to a *plaintext* `.csv` (passwords, TOTP secrets, and notes in the clear — none of the vault's protection) for import into another manager. It warns and asks for confirmation first; delete the file as soon as the move is done.
+
 ### Vault integrity manifest
 
 The vault carries a **keyed signature over the entire record set** — an HMAC-SHA-256 whose key is derived from *both master passwords* (Argon2id + HKDF). The server stores it but can never compute it, so only a password holder can produce a valid signature.
@@ -338,6 +355,7 @@ Single-key shortcuts work whenever you are not typing in a field (`Shift`+`Enter
 | `C` | Clear the displayed entry |
 | `A` / `I` | Open / close the About panel |
 | `X` | Lock the vault |
+| `U` | Toggle **Disable auto-lock** (only while the About panel is open) |
 | `Esc` | Close dialog / clear displayed entry |
 | `Esc` `Esc` | Lock the vault (press twice quickly) |
 
@@ -388,7 +406,19 @@ Hover any button or interactive field for a brief description of what it does.
 | Standard | Status | Notes |
 |---|---|---|
 | Argon2 (RFC 9106) | Met | Argon2id key derivation, m = 128 MiB, t = 3, p = 1 by default (exceeds the RFC 9106 second-recommended option); tunable per vault up to m = 1 GiB, t = 10, then HKDF-SHA-256 subkeys |
+| HKDF (RFC 5869) | Met | HKDF-SHA-256 expands the Argon2id master key into distinct per-record, per-purpose subkeys (separate `info` labels for name vs. payload AES keys) |
+| AES-GCM (NIST SP 800-38D) | Met | AES-256-GCM authenticated encryption (WebCrypto) for v6 record names and payloads; per-record random nonces |
+| HMAC (RFC 2104 / FIPS 198-1) | Met | HMAC-SHA-256 for the `vm2` vault integrity manifest; HMAC-SHA-1/256/512 for TOTP — both via WebCrypto |
+| AES / SHA-2 (FIPS 197 / 180-4) | Met | AES and the SHA-2 family are used through the platform WebCrypto implementation; not run in a FIPS-validated module |
 | RFC 6238 / 4226 | Met | TOTP with configurable period, digit count, and SHA-1/256/512 (plus Steam Guard); defaults to 30 s / 6 digits / SHA-1 |
+| otpauth:// Key URI Format | Met | `_parseOtp` reads the de-facto Google Authenticator URI for secret, digits, period, algorithm, issuer/label and Steam detection; QR import preserves the full URI when it carries non-default params |
+| Base32 / Base64 (RFC 4648) | Met | Base32 decoding of TOTP secrets (`base32ToBytes`); Base64 for ciphertext/binary transport |
+| WebAuthn L2 / FIDO2 (W3C / CTAP) | Met (extensions) | Passkeys: ECDSA P-256 key pairs, COSE-encoded public keys, JWK (RFC 7517) serialization, `navigator.credentials.create/get` interception in the Firefox/Chrome extensions; the PWA only displays and deletes stored passkeys |
+| HTTP Basic Auth (RFC 7617) | Met | Write operations gated by Basic Auth (`WWW-Authenticate: Basic realm="Password Vault", charset="UTF-8"`), constant-time credential compare; meaningful only over TLS |
+| HSTS (RFC 6797) | Met | `Strict-Transport-Security: max-age=63072000` (two years) on Apache and on `server.js` in `web` mode |
+| CSV (RFC 4180) | Met | RFC-4180 parser/writer (`_csvParse`/`_csvField`) for plaintext import/export interop with other password managers (header aliases for Bitwarden/Chrome/KeePass/1Password) |
+| PWA (W3C Web App Manifest / Service Workers) | Met | Installable web app via `manifest.json` and `sw.js`; the service worker caches only non-secret code assets and never the vault document |
+| NIST SP 800-63B (memorized secrets) | Partial | Allows long passphrases, no forced composition rules, no mandatory rotation/expiry; has a length/charset strength meter but **no** breached-password blocklist check (the `connect-src 'self'` CSP forbids the outbound calls a HIBP-style check would need) |
 | OWASP ASVS L1/L2 | Met | Client-side crypto, CSRF protection, Basic-Auth rate limiting, full security-header suite (CSP, HSTS, COOP/CORP, Permissions-Policy) |
 | OWASP ASVS L3 | Partial | `style-src 'unsafe-inline'` still required by inline `style` attributes; `script-src` is `'self' 'wasm-unsafe-eval'` (latter only to compile the Argon2id WASM). Key derivation is memory-hard Argon2id |
 | OWASP Secure Headers | Met | CSP, HSTS, `X-Content-Type-Options`, `Referrer-Policy`, `Permissions-Policy`, COOP/CORP all set |
@@ -456,8 +486,16 @@ location ~ /pass/[^/]+/(bak|moved)/ {
     deny all;
 }
 
-# Block Apache leftovers (.htaccess etc.) from being served.
-location ~ /\.ht {
+# Block private-key / signed-package build artifacts (the Chrome extension's
+# .pem signing key must never be downloadable) and shell scripts (regen.sh and
+# friends are operator tooling, not web assets).
+location ~ \.(pem|crx|xpi|sh)$ {
+    deny all;
+}
+
+# Block ALL dotfiles and dot-directories (.htaccess, .git, editor/tool state
+# like .claude/) — not just .ht*.
+location ~ /\. {
     deny all;
 }
 
@@ -482,16 +520,41 @@ add_header Permissions-Policy "camera=(self), geolocation=(), microphone=(), pay
 # Cross-origin isolation — detach this context from openers/embedders.
 add_header Cross-Origin-Opener-Policy "same-origin" always;
 add_header Cross-Origin-Resource-Policy "same-origin" always;
-# The vault HTML embeds the ciphertext DB — keep it out of on-disk caches.
-# Scope this to the vault host only; do NOT set it globally on a host that also
-# serves cache-friendly static content.
-add_header Cache-Control "no-store" always;
+# The vault HTML (index.html) embeds the ciphertext DB — keep it out of on-disk
+# caches. Scoped to index.html ONLY via the $vault_cache_control map below, so the
+# heavy non-secret code assets (javascript.js, argon2-worker.js) stay cacheable —
+# matching server.js and the .htaccess <FilesMatch>. Stays at the server level
+# (a map-driven variable, NOT a per-location add_header) so it does not trip the
+# replacement gotcha noted below. Scope to the vault host; do NOT set it globally
+# on a host that also serves cache-friendly static content.
+add_header Cache-Control $vault_cache_control always;
+```
+
+This last line is driven by a `map` that must live in the **`http {}`** block of `/etc/nginx/nginx.conf`
+(the same context as the gzip settings — `map` is not valid inside `server`/`location`):
+
+```nginx
+# no-store ONLY for the page that embeds the ciphertext DB (index.html); every
+# other path gets NO Cache-Control header, so the browser may cache the heavy
+# non-secret code assets. An empty value makes nginx omit the header entirely.
+# A directory request (…/pass/<inst>/) is internally rewritten to index.html by
+# `index index.html;`, so $uri ends in /index.html at header time.
+map $uri $vault_cache_control {
+    default          "";
+    ~/index\.html$   "no-store";
+    # Optional: server.js also sends no-store on write responses. POST replies
+    # aren't browser-cached anyway, so uncomment only for exact header parity:
+    # ~/post\.php$   "no-store";
+}
 ```
 
 > **nginx `add_header` gotcha:** if any `location` block defines its own `add_header`, it
 > **replaces** (does not merge) the ones inherited from the server level. Keep all the
 > `add_header` lines at the `server` level and avoid per-location `add_header` so they apply
-> everywhere, including the `post` (PHP) endpoint and error responses.
+> everywhere, including the `post` (PHP) endpoint and error responses. This is exactly why the
+> `Cache-Control` scoping uses a server-level `map` variable rather than a `location =
+> …/index.html` block — the latter would silently drop the CSP/HSTS/COOP headers from the
+> vault's most sensitive response.
 
 After editing, validate and reload: `nginx -t && systemctl reload nginx`. Confirm the blocks
 work against the **vhost that serves the vault** — requests to `…/pass/<user>/lines`, `/part1`,
@@ -502,8 +565,11 @@ both SNI and `Host` are correct:
 
 ```bash
 H=your.host; IP=203.0.113.10
-curl -sko /dev/null -w '%{http_code}\n' --resolve "$H:443:$IP" "https://$H/pass/master/lines"        # 403
-curl -skI --resolve "$H:443:$IP" "https://$H/pass/master/index.html" | grep -i content-security      # header present, 200
+curl -sko /dev/null -w '%{http_code}\n' --resolve "$H:443:$IP" "https://$H/pass/master/lines"          # 403
+curl -skI --resolve "$H:443:$IP" "https://$H/pass/master/index.html"  | grep -i content-security        # header present, 200
+# Cache-Control scoping: index.html is no-store; javascript.js carries no Cache-Control (cacheable)
+curl -skI --resolve "$H:443:$IP" "https://$H/pass/master/index.html"  | grep -i cache-control           # cache-control: no-store
+curl -skI --resolve "$H:443:$IP" "https://$H/pass/master/javascript.js" | grep -iE 'cache-control|content-security'  # CSP present, NO cache-control
 ```
 
 ### Or skip the web server: the standalone Node server

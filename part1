@@ -476,7 +476,11 @@ body.wide-controls .ctrl-form #entry-count-row {
    flex item so ellipsis truncation still works. */
 .entry-grid .entry-btn { display: flex; align-items: center; gap: 8px; }
 .entry-grid .entry-lbl {
-  flex: 1; min-width: 0;
+  /* flex:0 1 auto (not 1): the label shrinks to its content so a trailing
+     modifier glyph hugs the name, and only ellipsizes when it must — the
+     glyph lives outside this box (see .entry-passkey/.entry-note below) so it
+     is never clipped. */
+  flex: 0 1 auto; min-width: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .entry-avatar {
@@ -634,6 +638,41 @@ body.wide-controls .ctrl-form #entry-count-row {
 }
 #charset { display: contents; }
 .gen-grid label { cursor: pointer; }
+
+/* Generator mode toggle (Characters / Passphrase) + passphrase option rows. */
+.gen-mode-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  color: var(--text-2);
+  font-size: 13px;
+}
+.gen-mode-row label { cursor: pointer; margin-right: 8px; }
+.gen-phrase {
+  display: flex;
+  flex-direction: column;
+  row-gap: 8px;
+  margin-bottom: 10px;
+  color: var(--text-2);
+  font-size: 13px;
+}
+.gen-phrase .pp-row { display: flex; align-items: center; gap: 8px; }
+.gen-phrase .pp-row > label:first-child { min-width: 78px; cursor: default; }
+.gen-phrase .pp-row label { cursor: pointer; }
+#word-sep {
+  width: 54px;
+  background: var(--elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  color: var(--text);
+  font-size: 13px;
+  font-family: var(--mono);
+  padding: 2px 6px;
+  outline: none;
+  text-align: center;
+}
+#word-sep:focus { border-color: var(--accent); }
 
 /* ─── Dark-theme checkboxes & radios ──────────────────────────
    Custom-drawn (appearance:none) so the box/border/fill all follow
@@ -1178,17 +1217,24 @@ input[type=radio]:disabled { opacity: .45; cursor: default; }
 .lib-table .lt-info a:hover { color: var(--accent-h); text-decoration: underline; }
 .standards-grid {
   display: grid;
-  grid-template-columns: max-content max-content 1fr;
+  grid-template-columns: minmax(0,1fr) max-content;
   column-gap: 10px;
   row-gap: 3px;
   margin-top: 6px;
   font-size: 12px;
   align-items: baseline;
 }
-.sg-name { font-family: var(--mono); color: var(--text); white-space: nowrap; }
-.sg-met { color: var(--green); font-weight: 600; white-space: nowrap; }
-.sg-partial { color: var(--warn); font-weight: 600; white-space: nowrap; }
-.sg-desc { color: var(--text-2); }
+.sg-name { grid-column: 1; font-family: var(--mono); color: var(--text); }
+.sg-met, .sg-partial { grid-column: 2; font-weight: 600; white-space: nowrap; }
+.sg-met { color: var(--green); }
+.sg-partial { color: var(--warn); }
+.sg-desc { grid-column: 1 / -1; color: var(--text-2); margin-bottom: 4px; }
+@media (min-width: 610px) {
+  .standards-grid { grid-template-columns: max-content max-content 1fr; }
+  .sg-name { grid-column: auto; white-space: nowrap; }
+  .sg-met, .sg-partial { grid-column: auto; }
+  .sg-desc { grid-column: auto; margin-bottom: 0; }
+}
 .about-section code {
   font-family: var(--mono);
   font-size: 11px;
@@ -1314,8 +1360,18 @@ input[type=radio]:disabled { opacity: .45; cursor: default; }
 .fav-btn:hover    { color: var(--warn); background: rgba(var(--warn-rgb),.1); }
 .fav-btn.is-fav   { color: var(--warn); }
 .entry-btn.entry-fav::before { content: '\2605'; color: var(--warn); margin-right: 5px; }
-.entry-btn.entry-passkey .entry-lbl::after { content: '\1F510\FE0E'; margin-left: 6px; opacity: .85; }
-.entry-btn.entry-note .entry-lbl::after { content: '\1F4DD\FE0E'; margin-left: 6px; opacity: .8; }
+/* Trailing modifier glyphs live on the button (a flex item), NOT inside
+   .entry-lbl — the label truncates with an ellipsis, so a glyph nested in it
+   would be clipped on long names. flex:0 0 auto keeps them full-size; the 8px
+   grid gap spaces them off the name. (In select mode .entry-selected::after —
+   defined later, so it wins — replaces this glyph with the ✓ checkmark.) */
+.entry-btn.entry-passkey::after { content: '\1F510\FE0E'; flex: 0 0 auto; opacity: .85; }
+.entry-btn.entry-note::after    { content: '\1F4DD\FE0E'; flex: 0 0 auto; opacity: .8; }
+/* Stale (password unchanged > 1 year): ⏳ before the name. Stays on
+   .entry-lbl::before — it's a leading glyph, so the ellipsis (which truncates
+   the tail) never clips it, and both button pseudo-slots are taken (::before by
+   .entry-fav, ::after by passkey/note). A stale entry can also be a passkey. */
+.entry-btn.entry-stale .entry-lbl::before { content: '\23F3\FE0E'; margin-right: 6px; opacity: .8; }
 
 /* ─── Entry type toggle (entry form) ──────────────────────── */
 .type-toggle { display: flex; gap: 6px; flex: 1; min-width: 0; }

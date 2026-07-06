@@ -129,12 +129,26 @@ async function main() {
     }
 
     // -------------------------------------------------------------------------
-    console.log('\nlocal mode writes (no auth / no CSRF)');
+    console.log('\nlocal mode writes (no auth, but CSRF/same-origin still enforced)');
     {
         const { port } = await start({ mode: 'local', dir: seed(REC), user: 'pass', pass: 'word' });
+        const FORM = 'application/x-www-form-urlencoded';
         const fresh = makeRecord();
-        const add = await req(port, { method: 'POST', path: '/post.php', headers: { 'content-type': 'application/x-www-form-urlencoded' } }, 'data=' + encodeURIComponent(fresh));
-        eq('POST add → 200 (no auth needed locally)', add.status, 200);
+
+        // CSRF: a cross-origin page can reach the loopback server, so a simple POST
+        // with no same-origin signal must be refused even though local mode has no auth.
+        const noCsrf = await req(port, { method: 'POST', path: '/post.php', headers: { 'content-type': FORM } }, 'data=' + encodeURIComponent(fresh));
+        eq('POST without X-Requested-With → 403 (local CSRF guard)', noCsrf.status, 403);
+        const crossOrigin = await req(port, { method: 'POST', path: '/post.php', headers: {
+            'content-type': FORM, 'x-requested-with': 'XMLHttpRequest', origin: 'http://evil.example.com',
+        } }, 'data=' + encodeURIComponent(fresh));
+        eq('cross-origin POST → 403 (local CSRF guard)', crossOrigin.status, 403);
+
+        // The legit same-origin client (X-Requested-With + matching Origin) still writes.
+        const add = await req(port, { method: 'POST', path: '/post.php', headers: {
+            'content-type': FORM, 'x-requested-with': 'XMLHttpRequest', origin: 'http://127.0.0.1:' + port,
+        } }, 'data=' + encodeURIComponent(fresh));
+        eq('same-origin POST add → 200 (no auth needed locally)', add.status, 200);
         check('response is JSON', /application\/json/.test(add.headers['content-type']));
         check('added record reported in entries', add.body.indexOf(fresh) !== -1);
 

@@ -186,19 +186,39 @@ async function main() {
         const s1 = Buffer.from(webcrypto.getRandomValues(new Uint8Array(32))).toString('hex');
         const s2 = Buffer.from(webcrypto.getRandomValues(new Uint8Array(32))).toString('hex');
         const recs = ['recordAlpha', 'recordBeta', 'recordGamma'];
-        const h1 = await C._manifestHmacHex(pw1, pw2, s1, s2, 5, 1700000000, recs);
-        const h2 = await C._manifestHmacHex(pw1, pw2, s1, s2, 5, 1700000000, recs);
+        // Legacy vm1 (kdfStr = null): byte-identical signing to before this change.
+        const h1 = await C._manifestHmacHex(pw1, pw2, s1, s2, 5, 1700000000, null, recs);
+        const h2 = await C._manifestHmacHex(pw1, pw2, s1, s2, 5, 1700000000, null, recs);
         check('HMAC is deterministic', h1 === h2);
         check('HMAC is 64 hex chars', /^[0-9a-f]{64}$/.test(h1), h1);
 
-        const tampered = await C._manifestHmacHex(pw1, pw2, s1, s2, 5, 1700000000, ['recordAlpha', 'recordBetaX', 'recordGamma']);
+        const tampered = await C._manifestHmacHex(pw1, pw2, s1, s2, 5, 1700000000, null, ['recordAlpha', 'recordBetaX', 'recordGamma']);
         check('tampered record → different HMAC', tampered !== h1);
-        const wrongPw = await C._manifestHmacHex(pw1, 'WRONG', s1, s2, 5, 1700000000, recs);
+        const wrongPw = await C._manifestHmacHex(pw1, 'WRONG', s1, s2, 5, 1700000000, null, recs);
         check('wrong password → different HMAC', wrongPw !== h1);
 
         check('_constTimeHexEq matches equal', C._constTimeHexEq(h1, h2) === true);
         check('_constTimeHexEq rejects different', C._constTimeHexEq(h1, tampered) === false);
         check('_constTimeHexEq rejects length mismatch', C._constTimeHexEq(h1, h1.slice(0, -2)) === false);
+
+        // vm2 binds the kdf string into the signed message: a different declared
+        // cost must change the HMAC (so a server that swaps the served params is
+        // caught). These cost strings fall back to CHEAP_KDF for the actual
+        // derivation, but they still differ in the signed header — which is what
+        // the binding detects.
+        const kdfA = 'a2id|9000|2|1', kdfB = 'a2id|9000|3|1';
+        const v2a = await C._manifestHmacHex(pw1, pw2, s1, s2, 5, 1700000000, kdfA, recs);
+        const v2b = await C._manifestHmacHex(pw1, pw2, s1, s2, 5, 1700000000, kdfA, recs);
+        check('vm2 HMAC deterministic', v2a === v2b);
+        check('vm2 differs from vm1 (kdf bound in)', v2a !== h1);
+        const v2c = await C._manifestHmacHex(pw1, pw2, s1, s2, 5, 1700000000, kdfB, recs);
+        check('vm2 different kdf string → different HMAC', v2c !== v2a);
+
+        // _parseManifest accepts both shapes and validates the vm2 kdf field.
+        const A = 'a'.repeat(64), B = 'b'.repeat(64), H = 'c'.repeat(64), vKdf = 'a2id|65536|3|1';
+        check('_parseManifest reads vm2', (C._parseManifest('vm2|' + A + '|' + B + '|3|1700000000|' + vKdf + '|' + H) || {}).version === 'vm2');
+        check('_parseManifest reads legacy vm1', (C._parseManifest('vm1|' + A + '|' + B + '|3|1700000000|' + H) || {}).version === 'vm1');
+        check('_parseManifest rejects vm2 with out-of-bounds kdf', C._parseManifest('vm2|' + A + '|' + B + '|3|1700000000|a2id|99|3|1|' + H) === null);
     }
 
     console.log('\n' + passed + ' passed, ' + failed + ' failed');

@@ -525,31 +525,55 @@
     return p.join("|");
   }
 
-  // ---- Vault integrity manifest (vm1) ---------------------------------------
+  // ---- Vault integrity manifest (vm2; vm1 still verified) -------------------
   // Mirrors javascript.js's _parseManifest / _manifestHmacHex / _signVault so a
   // record written by the extension (the passkey-create path) can re-sign the
   // vault, exactly as the PWA auto-re-signs after its own writes. Without this
   // the new record would leave the served manifest signing the OLD set → the
   // PWA's reveal-all verify flips the integrity badge red ("HMAC mismatch").
+  // vm2 additionally binds the vault-wide Argon2id cost (the `kdf` field) into
+  // the signature; vm1 is still parsed so a vault signed before this change keeps
+  // verifying, and the extension always re-signs as vm2 (matching the PWA).
 
   function parseManifest(s) {
     if (typeof s !== "string" || s === "") return null;
     var p = s.split("|");
-    if (p.length !== 6 || p[0] !== "vm1") return null;
-    if (!/^[0-9a-f]{64}$/.test(p[1]) || !/^[0-9a-f]{64}$/.test(p[2])) return null;
-    if (!/^\d{1,15}$/.test(p[3]) || !/^\d{1,15}$/.test(p[4])) return null;
-    if (!/^[0-9a-f]{64}$/.test(p[5])) return null;
-    return {
-      salt1Hex: p[1], salt2Hex: p[2], revision: parseInt(p[3], 10),
-      timestamp: parseInt(p[4], 10), hmacHex: p[5],
-    };
+    if (p[0] === "vm1") {
+      if (p.length !== 6) return null;
+      if (!/^[0-9a-f]{64}$/.test(p[1]) || !/^[0-9a-f]{64}$/.test(p[2])) return null;
+      if (!/^\d{1,15}$/.test(p[3]) || !/^\d{1,15}$/.test(p[4])) return null;
+      if (!/^[0-9a-f]{64}$/.test(p[5])) return null;
+      return {
+        version: "vm1", salt1Hex: p[1], salt2Hex: p[2], revision: parseInt(p[3], 10),
+        timestamp: parseInt(p[4], 10), kdfStr: null, hmacHex: p[5],
+      };
+    }
+    if (p[0] === "vm2") {
+      // kdf ("a2id|m|t|p") is itself 4 pipe-separated tokens → 10 fields total.
+      if (p.length !== 10) return null;
+      if (!/^[0-9a-f]{64}$/.test(p[1]) || !/^[0-9a-f]{64}$/.test(p[2])) return null;
+      if (!/^\d{1,15}$/.test(p[3]) || !/^\d{1,15}$/.test(p[4])) return null;
+      var kdfStr = p.slice(5, 9).join("|");
+      if (!parseKdf(kdfStr)) return null;
+      if (!/^[0-9a-f]{64}$/.test(p[9])) return null;
+      return {
+        version: "vm2", salt1Hex: p[1], salt2Hex: p[2], revision: parseInt(p[3], 10),
+        timestamp: parseInt(p[4], 10), kdfStr: kdfStr, hmacHex: p[9],
+      };
+    }
+    return null;
   }
 
-  // HMAC-SHA-256(vaultKey, "vm1|s1|s2|rev|ts" + "\n" + records.join("\n")),
-  // vaultKey = HKDF(Argon2id(pw1,s1) ‖ Argon2id(pw2,s2), "v6|manifest|hmac").
-  // The two manifest salts are independent of any record's salts (kdf is the
-  // vault-wide Argon2id cost, so the keys derive at the same price the PWA pays).
-  async function manifestHmacHex(pw, pw2, salt1Hex, salt2Hex, revision, timestamp, records, kdf) {
+  function kdfToString(kdf) {
+    return "a2id|" + kdf.memorySize + "|" + kdf.iterations + "|" + kdf.parallelism;
+  }
+
+  // HMAC-SHA-256(vaultKey, header + "\n" + records.join("\n")) where header is
+  // "vm1|s1|s2|rev|ts" (kdfStr null) or "vm2|s1|s2|rev|ts|kdf"; vaultKey =
+  // HKDF(Argon2id(pw1,s1) ‖ Argon2id(pw2,s2), "v6|manifest|hmac"). `kdf` is the
+  // cost the manifest keys derive at (the signed cost for vm2). Manifest salts are
+  // independent of any record's salts.
+  async function manifestHmacHex(pw, pw2, salt1Hex, salt2Hex, revision, timestamp, kdfStr, records, kdf) {
     var mks = await Promise.all([
       deriveMasterKey(pw, hexToBytes(salt1Hex), kdf),
       deriveMasterKey(pw2, hexToBytes(salt2Hex), kdf),
@@ -559,7 +583,10 @@
     ikm.set(mks[1], 32);
     var keyBytes = await hkdfBytes(ikm, "v6|manifest|hmac");
     var ck = await crypto.subtle.importKey("raw", keyBytes, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-    var msg = "vm1|" + salt1Hex + "|" + salt2Hex + "|" + revision + "|" + timestamp + "\n" + records.join("\n");
+    var header = kdfStr
+      ? "vm2|" + salt1Hex + "|" + salt2Hex + "|" + revision + "|" + timestamp + "|" + kdfStr
+      : "vm1|" + salt1Hex + "|" + salt2Hex + "|" + revision + "|" + timestamp;
+    var msg = header + "\n" + records.join("\n");
     var sig = await crypto.subtle.sign("HMAC", ck, _TE.encode(msg));
     return bytesToHex(new Uint8Array(sig));
   }
@@ -569,8 +596,16 @@
     var m = parseManifest(manifestStr);
     if (!m) return { status: "fail", reason: "Malformed manifest" };
     var sortedRecords = records.slice().sort();
-    var computed = await manifestHmacHex(pw, pw2, m.salt1Hex, m.salt2Hex, m.revision, m.timestamp, sortedRecords, kdf);
+    // vm2 verifies at the *signed* cost (decoupled from the served params); vm1
+    // at the active cost, as before.
+    var deriveKdf = m.version === "vm2" ? (parseKdf(m.kdfStr) || kdf) : kdf;
+    var computed = await manifestHmacHex(pw, pw2, m.salt1Hex, m.salt2Hex, m.revision, m.timestamp, m.kdfStr, sortedRecords, deriveKdf);
     if (computed !== m.hmacHex) return { status: "fail", reason: "HMAC mismatch", revision: m.revision, timestamp: m.timestamp };
+    // The served (active) params must match what was signed, else the server
+    // swapped the cost after signing.
+    if (m.version === "vm2" && m.kdfStr !== kdfToString(kdf)) {
+      return { status: "fail", reason: "KDF parameters altered", revision: m.revision, timestamp: m.timestamp };
+    }
     return { status: "ok", revision: m.revision, timestamp: m.timestamp };
   }
 
@@ -579,18 +614,19 @@
     return bytesToHex(new Uint8Array(buf));
   }
 
-  // Build a fresh vm1 manifest + the matching expect_hash for the `sign=1`
-  // write. records must be the canonical, sorted (SORT_STRING) record set.
-  // Reuses the previous manifest's salts (so signing hits _mkCache) and bumps
-  // its revision by one; fresh salts only on a first-ever sign.
+  // Build a fresh vm2 manifest (binds the active Argon2id cost) + the matching
+  // expect_hash for the `sign=1` write. records must be the canonical, sorted
+  // (SORT_STRING) record set. Reuses the previous manifest's salts (so signing
+  // hits _mkCache) and bumps its revision by one; fresh salts only on a first sign.
   async function buildManifest(pw, pw2, records, prevManifest, kdf) {
     var old = parseManifest(prevManifest);
     var salt1Hex = old ? old.salt1Hex : bytesToHex(crypto.getRandomValues(new Uint8Array(32)));
     var salt2Hex = old ? old.salt2Hex : bytesToHex(crypto.getRandomValues(new Uint8Array(32)));
     var revision = (old ? old.revision : 0) + 1;
     var ts = Math.floor(Date.now() / 1000);
-    var hmac = await manifestHmacHex(pw, pw2, salt1Hex, salt2Hex, revision, ts, records, kdf);
-    var manifest = ["vm1", salt1Hex, salt2Hex, String(revision), String(ts), hmac].join("|");
+    var kdfStr = kdfToString(kdf);
+    var hmac = await manifestHmacHex(pw, pw2, salt1Hex, salt2Hex, revision, ts, kdfStr, records, kdf);
+    var manifest = ["vm2", salt1Hex, salt2Hex, String(revision), String(ts), kdfStr, hmac].join("|");
     var expectHash = await sha256Hex(records.join("\n"));
     return { manifest: manifest, expectHash: expectHash, revision: revision };
   }

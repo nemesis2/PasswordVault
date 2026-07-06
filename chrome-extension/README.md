@@ -38,7 +38,7 @@ the `passkey` sub-object, and commits an **atomic replace** (`delete_rec=<old>&d
 instead of adding a second record — so a passkey for a site you already have a login
 for lands on that login. Entries that already hold a passkey are shown disabled (no
 clobbering). After writing the record the extension also **re-signs the vault
-integrity manifest** (`vm1`) — like the PWA does after its own writes — so the new
+integrity manifest** (`vm2`) — like the PWA does after its own writes — so the new
 record doesn't trip the PWA's tamper check; this is best-effort (the PWA's Sign
 button can re-baseline if it fails).
 

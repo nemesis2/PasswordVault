@@ -15,7 +15,7 @@
 //
 // The write protocol is a faithful port of post.php — it must produce
 // byte-identical `lines` / `index.html` / `manifest` / `kdfparams`, because the
-// same vault can be served by either backend and the vm1 integrity manifest
+// same vault can be served by either backend and the vm2 integrity manifest
 // signs an exact, sorted record set. post.php is the canonical write protocol.
 //
 // Serves ONE vault directory (default: cwd). Multi-instance /pass/<inst>/ web
@@ -26,7 +26,7 @@
 // Module: require('./server.js') exposes the internals for the parity test.
 // =============================================================================
 
-const VERSION = '1.1.6';
+const VERSION = '1.1.11';
 
 const http    = require('http');
 const fs      = require('fs');
@@ -83,12 +83,25 @@ function isValidRecord(s) {
     return false;
 }
 
+// vm1: vm1|s1|s2|rev|ts|hmac ; vm2: vm2|s1|s2|rev|ts|kdf|hmac (binds the Argon2id
+// cost). Both accepted, shape-checked only (the HMAC is keyed off the passwords).
 function isValidManifest(s) {
     if (typeof s !== 'string' || s.length > 512) return false;
     const p = s.split('|');
-    if (p.length !== 6 || p[0] !== 'vm1') return false;
-    for (const i of [1, 2, 5]) if (p[i].length !== 64 || !isHex(p[i])) return false;
-    for (const i of [3, 4]) if (p[i] === '' || p[i].length > 15 || !isDigit(p[i])) return false;
+    let hex, dig;
+    if (p[0] === 'vm1') {
+        if (p.length !== 6) return false;
+        hex = [1, 2, 5]; dig = [3, 4];
+    } else if (p[0] === 'vm2') {
+        // kdf ("a2id|m|t|p") is 4 pipe-separated tokens → 10 fields; kdf at 5..8.
+        if (p.length !== 10) return false;
+        if (!isValidKdf(p.slice(5, 9).join('|'))) return false;
+        hex = [1, 2, 9]; dig = [3, 4];
+    } else {
+        return false;
+    }
+    for (const i of hex) if (p[i].length !== 64 || !isHex(p[i])) return false;
+    for (const i of dig) if (p[i] === '' || p[i].length > 15 || !isDigit(p[i])) return false;
     return true;
 }
 
@@ -187,7 +200,11 @@ function backupLines(dir, current) {
     if (!fs.existsSync(bakdir)) { try { fs.mkdirSync(bakdir, 0o700); } catch (_) {} }
     const d = new Date();
     const z = (n, w = 2) => String(n).padStart(w, '0');
-    const micro = Number(process.hrtime.bigint() % 1000000n);
+    // Sub-second suffix from the SAME wall-clock instant as the rest of the name
+    // (mirrors post.php's microtime fractional part). hrtime is a monotonic clock
+    // unrelated to wall time, so its mod-1e6 value did not order chronologically
+    // within a second — breaking the "lexical sort == oldest first" prune assumption.
+    const micro = d.getMilliseconds() * 1000;
     const dt = `${d.getFullYear()}-${z(d.getMonth() + 1)}-${z(d.getDate())}_` +
         `${z(d.getHours())}.${z(d.getMinutes())}.${z(d.getSeconds())}.${z(micro, 6)}`;
     const bakfile = path.join(bakdir, 'lines.' + dt);
@@ -278,9 +295,11 @@ function handleWrite(dir, params, isRegen) {
                 }
             } else {
                 data      = has('data') ? params['data'] : null;
-                de        = has('delete') ? parseInt(params['delete'], 10) : -1;
                 deleteRec = has('delete_rec') ? params['delete_rec'] : null;
-                if (!(de >= -1) || isNaN(de)) de = -1;
+                // Legacy delete-by-index removed in 1.1.10 (mirrors post.php):
+                // no client sends it, and intval semantics made a malformed
+                // value silently delete record 0. Reject it.
+                if (has('delete')) return bad();
                 if (deleteRec !== null && !isValidRecord(deleteRec)) return bad();
                 if (data !== null && (data.indexOf('\n') !== -1 || data.indexOf('\r') !== -1)) return bad();
                 if (data !== null && !isValidRecord(data)) return bad();
@@ -409,8 +428,11 @@ const MIME = {
 };
 const DENY_EXACT = new Set(['lines', 'trash', 'manifest', 'kdfparams', 'part1', 'part2']);
 const DENY_DIRS  = new Set(['bak', 'moved']);
+// Private-key / signed-package build artifacts and operator shell scripts must
+// never be served (the Chrome extension's .pem signing key above all).
+const DENY_EXT   = new Set(['.pem', '.crx', '.xpi', '.sh']);
 
-function securityHeaders(cfg, isIndex) {
+function securityHeaders(cfg) {
     const h = {
         'Content-Security-Policy': CSP,
         'X-Content-Type-Options': 'nosniff',
@@ -501,13 +523,14 @@ function serveStatic(req, res, cfg) {
     // Traversal / dotfile / deny-list guards.
     if (segments.some((s) => s === '..' || s.startsWith('.'))) { res.writeHead(403); return res.end('Forbidden'); }
     if (DENY_DIRS.has(segments[0]) || DENY_EXACT.has(segments[segments.length - 1])) { res.writeHead(403); return res.end('Forbidden'); }
+    if (DENY_EXT.has(path.extname(segments[segments.length - 1]).toLowerCase())) { res.writeHead(403); return res.end('Forbidden'); }
     const full = path.join(cfg.dir, rel);
     if (!full.startsWith(path.resolve(cfg.dir))) { res.writeHead(403); return res.end('Forbidden'); }
     fs.readFile(full, (err, buf) => {
         if (err) { res.writeHead(404); return res.end('Not found'); }
         const ext = path.extname(full).toLowerCase();
         const isIndex = path.basename(full) === 'index.html';
-        const headers = Object.assign({ 'Content-Type': MIME[ext] || 'application/octet-stream' }, securityHeaders(cfg, isIndex));
+        const headers = Object.assign({ 'Content-Type': MIME[ext] || 'application/octet-stream' }, securityHeaders(cfg));
         // index.html embeds the ciphertext DB → never cache. Static assets may cache.
         if (!isIndex) delete headers['Cache-Control'];
         res.writeHead(200, headers);
@@ -518,7 +541,19 @@ function serveStatic(req, res, cfg) {
 function handlePost(req, res, cfg, isRegen) {
     if (cfg.mode === 'web') {
         if (!requireBasicAuth(req, res, cfg)) return;
-        if (!isRegen && (req.method !== 'POST' || !isSameOrigin(req))) { res.writeHead(403); return res.end('Forbidden'); }
+    }
+    // CSRF / same-origin guard — enforced in BOTH modes for non-regen writes.
+    // Local mode is loopback-bound but NOT immune to CSRF: a page the user opens
+    // in their browser can still reach 127.0.0.1 and drive a state-changing write
+    // (delete / purge_trash / inject a crafted record) via a "simple" cross-origin
+    // form POST, which needs no preflight. The same-origin check (Origin/Referer
+    // host match + the X-Requested-With sentinel our client always sends, which a
+    // simple cross-origin request cannot set without a CORS preflight the server
+    // never satisfies) blocks that without affecting the legit same-origin client.
+    // It also still 403s a bare GET /post.php (typed URL, prefetch), matching
+    // post.php. Regen takes no attacker input and is exempt (matches post.php).
+    if (!isRegen && (req.method !== 'POST' || !isSameOrigin(req))) {
+        res.writeHead(403); return res.end('Forbidden');
     }
     // Regen with no body (GET) is fine; otherwise collect the urlencoded body.
     const chunks = [];
@@ -535,7 +570,7 @@ function handlePost(req, res, cfg, isRegen) {
         // querystring may yield arrays on duplicate keys; flatten to the first (PHP $_POST keeps the last — but our client never duplicates).
         for (const k of Object.keys(params)) if (Array.isArray(params[k])) params[k] = params[k][params[k].length - 1];
         const result = handleWrite(cfg.dir, params, isRegen);
-        const headers = securityHeaders(cfg, false);
+        const headers = securityHeaders(cfg);
         if (result.json !== undefined) {
             headers['Content-Type'] = 'application/json; charset=utf-8';
             res.writeHead(result.code, headers);
@@ -558,7 +593,7 @@ function createServer(cfg) {
         if (isPostEndpoint || (req.method === 'POST')) {
             // Only the post endpoint accepts writes; a POST elsewhere is 404.
             if (!isPostEndpoint) { res.writeHead(404); return res.end('Not found'); }
-            return handlePost(req, res, cfg, isRegen || req.method === 'GET' && isRegen);
+            return handlePost(req, res, cfg, isRegen);
         }
         if (req.method !== 'GET' && req.method !== 'HEAD') { res.writeHead(405); return res.end('Method not allowed'); }
         return serveStatic(req, res, cfg);

@@ -176,6 +176,44 @@
     throw new DOMException((res && res.error) || "Passkey assertion failed", "NotAllowedError");
   }
 
+  // ---- capability probes ----
+  // Relying parties (e.g. Google) call these BEFORE create() to decide whether to
+  // even offer passkey enrollment. The vault is a virtual platform authenticator
+  // that performs user verification (the master-password prompt), but the browser's
+  // native probes only see the underlying OS — on a device with no platform
+  // authenticator (a typical Linux desktop) native isUVPAA() resolves false and the
+  // RP shows "a passkey can't be created on this device", never reaching our
+  // create() override. Report the vault's capability so enrollment is offered; if
+  // the user then declines the vault, create() still falls back to native.
+  var PKC = window.PublicKeyCredential;
+  var _nativeGetCaps = typeof PKC.getClientCapabilities === "function"
+    ? PKC.getClientCapabilities.bind(PKC) : null;
+  try {
+    Object.defineProperty(PKC, "isUserVerifyingPlatformAuthenticatorAvailable", {
+      configurable: true, writable: true, enumerable: false,
+      value: function () { return Promise.resolve(true); },
+    });
+  } catch (e) {}
+  // Only override getClientCapabilities where it exists natively (Chrome 133+);
+  // never invent it on browsers that lack it, or a feature-detecting RP would
+  // prefer an object we can't fully populate. Merge over the native result so real
+  // capabilities (conditional UI, hybrid transport) are preserved.
+  if (_nativeGetCaps) {
+    try {
+      Object.defineProperty(PKC, "getClientCapabilities", {
+        configurable: true, writable: true, enumerable: false,
+        value: function () {
+          return _nativeGetCaps().catch(function () { return {}; }).then(function (caps) {
+            var out = Object.assign({}, caps);
+            out.userVerifyingPlatformAuthenticator = true;
+            out.passkeyPlatformAuthenticator = true;
+            return out;
+          });
+        },
+      });
+    } catch (e) {}
+  }
+
   // Replace the methods. Non-configurable so page scripts can't clobber them.
   try {
     Object.defineProperty(navigator.credentials, "create", {

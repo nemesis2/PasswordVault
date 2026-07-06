@@ -20,7 +20,9 @@ self-hosted tool, not an oversight.
 |--------|---------|
 | Theft of the stored ciphertext (`lines`, backups) | Four-cipher cascade under two Argon2id-derived master keys; encrypted entry names; length-hiding padding |
 | Offline brute force of a stolen vault | Memory-hard Argon2id (default m=128 MiB, t=3; tunable up to 1 GiB / t=10) over per-record salts |
-| Tampering / corruption / rollback of the record set | Keyed `vm1` HMAC integrity manifest (only a password holder can forge); monotonic revision with a per-device high-water mark |
+| Tampering / corruption / rollback of the record set | Keyed `vm2` HMAC integrity manifest (only a password holder can forge); monotonic revision with a per-device high-water mark |
+| Downgrade of the served Argon2id cost (`kdfparams`) | `vm2` binds the cost into the signed manifest; a swapped cost is caught at load (password-free) and at verify, not silently weakening new writes |
+| A swapped `javascript.js` (served-code tampering) | **Out-of-band**: the browser extensions pin the SHA-256 of the served `javascript.js` + `argon2-worker.js` and warn + disable autofill on mismatch (the one defense the in-page manifest can't provide) |
 | Unauthorized writes | HTTP Basic-Auth + same-origin/CSRF check, constant-time credential compare |
 | Online password guessing against the write endpoint | Per-IP sliding-window rate limit (5 fails / 15 min) |
 | Passive data exposure of the served files | CSP (no inline scripts), sensitive-file deny rules, `no-store`, COOP/CORP/HSTS |
@@ -31,21 +33,35 @@ self-hosted tool, not an oversight.
 ## Explicit non-goals (NOT defended) — by design
 
 - **A compromised server.** Anything that can rewrite the served `javascript.js`
-  can exfiltrate plaintext as you type. The `vm1` manifest protects vault **data**
+  can exfiltrate plaintext as you type. The `vm2` manifest protects vault **data**
   integrity, **not the code** — this is an in-band limitation acknowledged up
-  front. The roadmap's strongest mitigation is **out-of-band**: a browser
-  extension that pins the SHA-256 of `javascript.js`. The bundled service worker
-  (`sw.js`) is a first step (it can report the running bundle's hash) but does
-  **not** itself defeat a compromised server.
+  front. The mitigation is **out-of-band** and now shipped: the browser extensions
+  pin the SHA-256 of the served `javascript.js` + `argon2-worker.js` (`code-pins.js`,
+  regenerated per release by `update-code-pins.sh`) and, on a mismatch, warn
+  prominently and disable autofill (warn-not-block — see
+  [docs/integrity-and-auth.md](docs/integrity-and-auth.md) → Code-Integrity Pinning).
+  This narrows the hole to a user who only ever touches the PWA on a device with no
+  extension installed; the bundled service worker (`sw.js`) merely *reports* a hash
+  (`GET_ASSET_HASHES`) and does **not** itself defeat a compromised server.
 - **A brand-new device with no history.** It trusts the first vault state it sees
   (no prior revision to compare against) — trust-on-first-use.
 - **Endpoint compromise / malware / hardware keyloggers** on the client device.
 - **Metadata about *when* you use the vault** (request timing) beyond what TLS hides.
 - **The default placeholder credentials.** `pass`/`word` are meant to be changed
   per deployment; they are kept as-is only on the maintainer's LAN-only dev box.
+- **A rogue browser extension with host permissions on the vault.** The CSRF
+  check accepts any `chrome-extension://` / `moz-extension://` origin (needed for
+  the passkey companion — Firefox's per-install UUIDs can't be pinned server-side),
+  so an installed malicious extension riding the browser's cached Basic-Auth
+  credentials could issue writes. Writes are still shape-validated ciphertext and
+  every pre-write state lands in `bak/`, so the damage is bounded and recoverable.
+- **Old-key ciphertext in `bak/` after a password change.** The change re-encrypts
+  `lines` and empties the trash, but server-side backups remain readable with the
+  *old* passwords until pruned (`VAULT_BAK_MAX_AGE_DAYS`, default 60 days) — delete
+  them manually if the old passwords are considered compromised.
 - **Recovery from a forgotten master password.** There is intentionally no
   backdoor — losing both passwords means losing the vault. (A recovery mechanism
-  is a roadmap item; see [suggestions.md](suggestions.md).)
+  is a roadmap item; see [SUGGESTIONS.md](SUGGESTIONS.md).)
 
 ## Cryptographic construction (summary)
 
@@ -56,9 +72,10 @@ self-hosted tool, not an oversight.
   Serpent-256-CTR`. The two inner AEAD layers provide authentication; the outer
   CTR layers add cipher diversity.
 - **Names:** `AES-256-GCM(pw1) → ChaCha20-Poly1305(pw2)`.
-- **Integrity:** `vm1` = `HMAC-SHA-256(vaultKey, header + "\n" +
-  sortedRecords.join("\n"))`, `vaultKey = HKDF(Argon2id(pw1,s1) ‖
-  Argon2id(pw2,s2))`.
+- **Integrity:** `vm2` = `HMAC-SHA-256(vaultKey, header + "\n" +
+  sortedRecords.join("\n"))` where `header` binds the Argon2id cost
+  (`vm2|s1|s2|rev|ts|kdf`), `vaultKey = HKDF(Argon2id(pw1,s1) ‖
+  Argon2id(pw2,s2))`. Legacy `vm1` (no bound cost) is still verified.
 - **Passkeys (extension authenticator):** WebAuthn credentials are **ECDSA
   P-256 (ES256)**. The private key (`privateKeyJwk`) is stored inside an ordinary
   record's encrypted payload, so it is protected by the same cascade + KDF as every

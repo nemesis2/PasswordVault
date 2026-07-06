@@ -11,8 +11,7 @@ bak/*
 !bak/.htaccess
 
 # --- Offline re-encryption tooling working files (ciphertext) ---
-moved/lines.*
-moved/javascript.params-old.js
+moved/
 
 # --- Extension build artifacts & signing keys (NEVER commit) ---
 *.pem

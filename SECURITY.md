@@ -27,7 +27,7 @@ and serves ciphertext and never sees a plaintext password or a master key.
   fails closed.
 - **Length-hiding padding** pads each payload to a 256-byte bucket so ciphertext
   length doesn't leak secret length.
-- **Vault integrity** is signed by a keyed HMAC manifest (`vm1`) that only a
+- **Vault integrity** is signed by a keyed HMAC manifest (`vm2`) that only a
   password holder can forge — it detects tampering, corruption, and rollback of
   the whole record set, which per-record authentication alone cannot.
 - **Transport / access**: writes are HTTP Basic-Auth + CSRF gated and

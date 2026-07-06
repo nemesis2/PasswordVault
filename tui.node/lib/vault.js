@@ -6,7 +6,7 @@
 //   - `lines`    : one 11-field v6 record per line, sorted SORT_STRING, '\n'-joined + trailing '\n'
 //   - `bak/`     : timestamped pre-write backups, pruned to BAK_KEEP newest and
 //                  BAK_MAX_AGE old (overridable via VAULT_BAK_KEEP / VAULT_BAK_MAX_AGE_DAYS)
-//   - `manifest` : single `vm1|…` integrity line + trailing '\n'
+//   - `manifest` : single `vm2|…` (or legacy `vm1|…`) integrity line + trailing '\n'
 //
 // Records are all-ASCII (hex + 'v6' + '|'), so JS default sort == PHP SORT_STRING.
 // ============================================================
@@ -126,11 +126,24 @@ function readKdf() {
     catch (e) { if (e.code === 'ENOENT') return null; throw e; }
 }
 
+// Accepts both manifest versions (mirrors javascript.js's _parseManifest):
+//   vm1 | salt1 | salt2 | revision | timestamp | hmac            (legacy, 6 fields)
+//   vm2 | salt1 | salt2 | revision | timestamp | kdf | hmac      (kdf is itself
+//       "a2id|m|t|p", so a vm2 manifest splits into 10 fields; kdf occupies 5..8)
 function parseManifest(str) {
     if (!str) return null;
     const p = str.split('|');
-    if (p.length !== 6 || p[0] !== 'vm1') return null;
-    return { salt1Hex: p[1], salt2Hex: p[2], revision: parseInt(p[3], 10), timestamp: parseInt(p[4], 10), hmacHex: p[5] };
+    if (p[0] === 'vm1') {
+        if (p.length !== 6) return null;
+        return { version: 'vm1', salt1Hex: p[1], salt2Hex: p[2], revision: parseInt(p[3], 10),
+                 timestamp: parseInt(p[4], 10), kdfStr: null, hmacHex: p[5] };
+    }
+    if (p[0] === 'vm2') {
+        if (p.length !== 10) return null;
+        return { version: 'vm2', salt1Hex: p[1], salt2Hex: p[2], revision: parseInt(p[3], 10),
+                 timestamp: parseInt(p[4], 10), kdfStr: p.slice(5, 9).join('|'), hmacHex: p[9] };
+    }
+    return null;
 }
 
 module.exports = {

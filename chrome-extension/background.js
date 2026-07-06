@@ -439,6 +439,14 @@ async function _getVaultUrl() {
   catch (e) { return ""; }
 }
 
+// Basic-Auth write username the approval window prefills. Sticky: the last
+// successfully-used value is stored (approval-submit below), so a deployment
+// that changed the default server-side isn't stuck retyping it per ceremony.
+async function _getWriteUser() {
+  try { var s = await chrome.storage.local.get("writeUser"); return (s && s.writeUser) || "pass"; }
+  catch (e) { return "pass"; }
+}
+
 async function _openApproval(info) {
   var id = "ap" + Date.now() + "-" + Math.random().toString(36).slice(2);
   info.id = id;
@@ -614,7 +622,7 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
         if (!info) return { ok: false };
         return {
           ok: true, mode: info.mode, rpId: info.rpId, rpName: info.rpName,
-          origin: info.origin, vaultUrl: info.vaultUrl, writeUser: "pass",
+          origin: info.origin, vaultUrl: info.vaultUrl, writeUser: await _getWriteUser(),
         };
       }
       if (msg.cmd === "approval-candidates") {
@@ -668,6 +676,8 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
           targetId: (r.targetId == null ? null : r.targetId),
         });
         if (res && res.ok) {
+          // Remember the write username that just worked (prefill next ceremony).
+          try { if (r.writeUser) chrome.storage.local.set({ writeUser: r.writeUser }); } catch (e) {}
           // The new entry may now be in the session — refresh match hosts/icon.
           try {
             var s2 = await toOffscreen({ cmd: "status" });

@@ -28,6 +28,7 @@ var SESSION = {
   entries: [], // [{ id, name, url, username, password, token, notes, record, passkey, isNote }]
   integrity: null, // { status, revision?, timestamp?, reason? } from verifyManifest
   integrityFailed: false, // Firefox badge state; unused by the Chrome offscreen page
+  code: null, // { status: ok|mismatch|unknown|error, reason? } from _verifyCode (code-integrity pinning)
 };
 
 // ---- Crypto self-test ----
@@ -259,12 +260,15 @@ async function _unlockInner(vaultUrl, pw, pw2, gen) {
   SESSION.vaultUrl = vaultUrl;
   SESSION.entries = entries;
   SESSION.integrity = await VaultCrypto.verifyManifest(manifest, pw, pw2, records, kdf);
+  // Code-integrity pinning: verify the served app bundle against the pinned hash.
+  SESSION.code = await _verifyCode(vaultUrl);
   return {
     ok: true,
     count: entries.length,
     vaultUrl: vaultUrl,
     hosts: entries.map(function (e) { return e.url; }),
     integrityFailed: SESSION.integrity.status === "fail",
+    codeMismatch: SESSION.code.status === "mismatch",
   };
 }
 
@@ -296,6 +300,43 @@ function _normVaultUrl(u) {
   if (!u) return "";
   if (!/^https?:\/\//i.test(u)) u = "https://" + u;
   return u.replace(/\/+$/, "");
+}
+
+// Code-integrity pinning. The extension is locally-installed code the server can
+// NOT rewrite — making it the trust anchor that closes the vault's one accepted
+// hole: a compromised server shipping a malicious javascript.js (which the in-page
+// vm2 manifest can't catch, since it signs data, not code). Here we fetch the
+// served app bundle and compare each file's SHA-256 against the hash pinned in
+// code-pins.js (regenerated per release by update-code-pins.sh).
+//   ok       — every pinned file matched.
+//   mismatch — at least one differs → the served code was swapped. Callers warn
+//              prominently and refuse autofill (warn-not-block: unlock still works
+//              so the user can read/repair, but no secret is typed into a page).
+//   unknown  — no pins bundled (e.g. a dev build) → unverified, not blocked.
+//   error    — a file couldn't be fetched (offline, 404) → unverified, not blocked.
+// Fetched with credentials omitted: the code assets are public (only writes are
+// Basic-Auth gated), and no-store so we hash exactly what is being served now.
+async function _verifyCode(vaultUrl) {
+  var pins = (typeof VAULT_CODE_PINS !== "undefined") ? VAULT_CODE_PINS : null;
+  if (!pins || !pins.hashes) return { status: "unknown", reason: "no pins bundled" };
+  var base = _normVaultUrl(vaultUrl);
+  var names = Object.keys(pins.hashes);
+  var bad = [];
+  try {
+    for (var i = 0; i < names.length; i++) {
+      var want = pins.hashes[names[i]];
+      if (!want) continue;
+      var resp = await fetch(base + "/" + names[i], { credentials: "omit", cache: "no-store" });
+      if (!resp.ok) return { status: "error", reason: names[i] + " HTTP " + resp.status, pinVersion: pins.version };
+      var buf = await resp.arrayBuffer();
+      var got = VaultCrypto.bytesToHex(new Uint8Array(await crypto.subtle.digest("SHA-256", buf)));
+      if (got !== want) bad.push(names[i]);
+    }
+  } catch (e) {
+    return { status: "error", reason: (e && e.message) || "fetch failed", pinVersion: pins.version };
+  }
+  if (bad.length) return { status: "mismatch", reason: bad.join(", "), pinVersion: pins.version };
+  return { status: "ok", pinVersion: pins.version };
 }
 
 // Fetch + parse the vault index (records + KDF). Used by passkey create so a new

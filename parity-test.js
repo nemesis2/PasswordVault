@@ -113,7 +113,12 @@ scenario('edit (delete+add atomic)', r, { delete_rec: r[3], data: makeRecord() }
 scenario('delete stale (gone) → 409', r, { delete_rec: makeRecord() }, false);
 
 const signManifest = `vm1|${rh(64)}|${rh(64)}|7|1750000000|${rh(64)}`;
-scenario('sign (manifest store)', r, { sign: '1', manifest: signManifest, expect_hash: joinHash(srv.sortRecords(r)) }, false);
+scenario('sign (vm1 manifest store)', r, { sign: '1', manifest: signManifest, expect_hash: joinHash(srv.sortRecords(r)) }, false);
+
+// vm2 binds the kdf into the manifest (10 pipe fields); both backends must
+// shape-accept and store it byte-identically.
+const signManifest2 = `vm2|${rh(64)}|${rh(64)}|8|1750000000|a2id|262144|4|1|${rh(64)}`;
+scenario('sign (vm2 manifest store)', r, { sign: '1', manifest: signManifest2, expect_hash: joinHash(srv.sortRecords(r)) }, false);
 
 const bulkNew = Array.from({ length: 5 }, makeRecord);
 scenario('bulk replace (same count)', r, { bulk: '1', bulk_data: bulkNew.join('\n'), expect_hash: joinHash(srv.sortRecords(r)) }, false);
@@ -124,6 +129,33 @@ const restoreNew = Array.from({ length: 8 }, makeRecord);
 scenario('restore (count change)', r, { restore: '1', bulk_data: restoreNew.join('\n'), expect_hash: joinHash(srv.sortRecords(r)) }, false);
 
 scenario('invalid record → 400', r, { data: 'not|a|valid|record' }, false);
+
+// The legacy delete-by-index param was removed in 1.1.10: both backends must
+// reject it with 400 and leave every file untouched (it had no staleness guard
+// and intval semantics turned malformed values into "delete record 0").
+scenario('legacy delete-by-index → 400', r, { delete: '0' }, false);
+scenario('legacy delete (non-numeric) → 400', r, { delete: 'abc' }, false);
+
+// ---- post.php origin check on a non-default port ----
+// Regression for the host[:port] compare: HTTP_HOST carries the port on e.g.
+// :8080, parse_url's HOST component never does — before 1.1.10 every write on a
+// non-default port 403'd. Drive post.php directly with a ported Host + Origin.
+(function portedOriginCheck() {
+    const dir = seed(r);
+    const setup = `error_reporting(0);` +
+        `$_SERVER["HTTP_HOST"]="localhost:8080";$_SERVER["HTTP_X_REQUESTED_WITH"]="XMLHttpRequest";` +
+        `$_SERVER["HTTP_ORIGIN"]="http://localhost:8080";$_SERVER["PHP_AUTH_USER"]="pass";` +
+        `$_SERVER["PHP_AUTH_PW"]="word";$_SERVER["REMOTE_ADDR"]="cli";` +
+        `$_SERVER["REQUEST_METHOD"]="POST";$_POST["data"]=${JSON.stringify(makeRecord())};` +
+        `chdir(${JSON.stringify(dir)});include ${JSON.stringify(POSTPHP)};`;
+    let out = '';
+    try { out = execFileSync('php', ['-r', setup], { encoding: 'utf8' }); } catch (e) { out = String(e.message); }
+    let ok = false;
+    try { ok = JSON.parse(out).ok === true; } catch (_) {}
+    if (ok) { pass++; console.log('  ✓ origin check accepts non-default port (host:port)'); }
+    else { fail++; console.log(`  ✗ origin check accepts non-default port — got: ${out.slice(0, 80)}`); }
+    fs.rmSync(dir, { recursive: true, force: true });
+})();
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

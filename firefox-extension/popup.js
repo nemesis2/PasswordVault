@@ -200,17 +200,34 @@ async function showEntries() {
     metaEl.appendChild(metaR);
   }
   var integrityFailed = intg && intg.status === "fail";
+  // Code-integrity pinning: a mismatch means the served app bundle doesn't match
+  // the hash this extension pinned — the served javascript.js may have been
+  // tampered. Warn prominently and disable autofill (warn-not-block).
+  var code = r && r.code;
+  var codeMismatch = code && code.status === "mismatch";
   var intNotice = $("integrity-notice");
-  if (integrityFailed) {
-    if (intNotice) {
+  if (intNotice) {
+    if (integrityFailed) {
       $("integrity-reason").textContent = intg.reason || "HMAC mismatch";
       intNotice.hidden = false;
+    } else {
+      intNotice.hidden = true;
     }
+  }
+  var codeNotice = $("code-notice");
+  if (codeNotice) {
+    if (codeMismatch) {
+      $("code-reason").textContent = "Altered: " + (code.reason || "app bundle");
+      codeNotice.hidden = false;
+    } else {
+      codeNotice.hidden = true;
+    }
+  }
+  if (integrityFailed || codeMismatch) {
     $("filter").disabled = true;
     $("filter").value = "";
     render([]);
   } else {
-    if (intNotice) intNotice.hidden = true;
     $("filter").disabled = false;
     render(_entries);
   }

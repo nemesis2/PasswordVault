@@ -14,6 +14,10 @@
 #                                                                (needs: node)
 #   test-http.js            server.js HTTP layer: static guards, auth, CSRF,
 #                           rate-limit, headers, via a live server (needs: node)
+#   test-tui.js             tui.node: lib/vault.js storage, lib/crypto.js v6
+#                           cascade, lib/model.js Vault CRUD against seeded
+#                           temp dirs, and byte-format interop with the
+#                           browser's javascript.js                (needs: node)
 #   selftest.js (×2)        Firefox + Chrome extension passkey crypto round-trip
 #                                                                (needs: node)
 #   test-browser.js         end-to-end PWA in headless Chromium: unlock, reveal,
@@ -56,6 +60,7 @@ run "client crypto (test-client.js)"        node test-client.js
 run "client logic (test-client-extras.js)"  node test-client-extras.js
 run "server protocol (test-server.js)"      node test-server.js
 run "server HTTP layer (test-http.js)"      node test-http.js
+run "TUI (test-tui.js)"                     node test-tui.js
 run "firefox extension (selftest.js)"       node firefox-extension/selftest.js
 run "chrome extension (selftest.js)"        node chrome-extension/selftest.js
 

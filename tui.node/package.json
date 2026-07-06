@@ -1,6 +1,6 @@
 {
   "name": "vault-tui",
-  "version": "1.1.6",
+  "version": "1.1.11",
   "description": "ANSI terminal client for the client-side-encrypted password vault (v6 cascade).",
   "bin": { "vault-tui": "vault-tui.js" },
   "main": "vault-tui.js",

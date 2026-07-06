@@ -1685,7 +1685,7 @@ var _v5Names = new Map();
 // notes vault-wide without re-decrypting, since reveal-all already derives every
 // record's keys.
 var _searchText  = new Map();
-var _entryBadges = new Map(); // rowKey → { passkey: bool, note: bool }
+var _entryBadges = new Map(); // rowKey → { passkey: bool, note: bool, stale: bool }
 
 // Build the { tags, notes, extra } lowercased search-index entry from a decrypted
 // payload. `extra` flattens every custom field's label + value so a "!" search
@@ -2652,6 +2652,23 @@ var _clipboardDirty = false;
 var _clipClearTimer = null;
 var _CLIP_CLEAR_MS  = 45000;
 
+// Write a secret to the clipboard, mark it dirty (so lock/auto-clear know to wipe
+// it), and (re)arm the _CLIP_CLEAR_MS auto-clear timer. Shared by every copy path
+// so the dirty-flag + auto-clear contract can never drift between them.
+function _armClipboard(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).catch(function() { _fallbackCopy(text); });
+    } else {
+        _fallbackCopy(text);
+    }
+    _clipboardDirty = true;
+    clearTimeout(_clipClearTimer);
+    _clipClearTimer = setTimeout(function() {
+        _clearClipboardIfDirty();
+        showToast('Clipboard cleared');
+    }, _CLIP_CLEAR_MS);
+}
+
 function doCBCopy(what) {
     var text = '', label = '', flashEl = null;
     switch (what) {
@@ -2681,17 +2698,7 @@ function doCBCopy(what) {
         void flashEl.offsetWidth;
         flashEl.classList.add('copy-flash');
     }
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(text).catch(function() { _fallbackCopy(text); });
-    } else {
-        _fallbackCopy(text);
-    }
-    _clipboardDirty = true;
-    clearTimeout(_clipClearTimer);
-    _clipClearTimer = setTimeout(function() {
-        _clearClipboardIfDirty();
-        showToast('Clipboard cleared');
-    }, _CLIP_CLEAR_MS);
+    _armClipboard(text);
     if (label) showToast(label);
 }
 
@@ -3134,20 +3141,11 @@ function _populateExtraFields(arr) {
 }
 
 // ── Copy arbitrary text (custom field / password-history value) ─────────────
-// Mirrors doCBCopy's clipboard-dirty + auto-clear arming for one-off values.
+// Uses the shared _armClipboard so the dirty-flag + auto-clear contract matches
+// doCBCopy exactly.
 function _copyValue(text, label) {
     if (!text) { showToast('Nothing to copy'); return; }
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(text).catch(function() { _fallbackCopy(text); });
-    } else {
-        _fallbackCopy(text);
-    }
-    _clipboardDirty = true;
-    clearTimeout(_clipClearTimer);
-    _clipClearTimer = setTimeout(function() {
-        _clearClipboardIfDirty();
-        showToast('Clipboard cleared');
-    }, _CLIP_CLEAR_MS);
+    _armClipboard(text);
     showToast(label || 'Copied');
 }
 
@@ -3407,8 +3405,12 @@ function _resetKeyFields() {
     _updateVaultKeyBar();
 }
 
-function clearLines(td) {
-    blinkTD(td);
+// Shared teardown for every lock path (manual clear, double-Esc, idle auto-lock).
+// Wipes the derived master keys and decrypted state, tears down the Argon2id
+// worker pool, clears the clipboard, and re-locks the entry grid. Callers add
+// their own UI chrome (toasts, overlay closing, scroll). Keeping the security-
+// sensitive teardown in one place stops the three lock paths from drifting.
+function _lockCore() {
     _resetKeyFields();
     _mkCache.clear();
     _terminateArgonPool();
@@ -3420,6 +3422,11 @@ function clearLines(td) {
     document.getElementById('newentry-title').textContent     = 'New Entry';
     _clearClipboardIfDirty();
     _relockV5Entries();
+}
+
+function clearLines(td) {
+    blinkTD(td);
+    _lockCore();
 }
 
 function renderDecodedFields() {
@@ -3622,7 +3629,7 @@ function _rebuildEntryGrid(entries) {
             if (cached !== undefined) {
                 _setEntryName(btn, cached);
                 var _b = _entryBadges.get(rowKey);
-                if (_b) { _markPasskeyButton(btn, _b.passkey); _markNoteButton(btn, _b.note); }
+                if (_b) { _markPasskeyButton(btn, _b.passkey); _markNoteButton(btn, _b.note); _markStaleButton(btn, _b.stale); }
             } else {
                 btn.classList.add('v5-locked');
                 btn.style.display = 'none';
@@ -3768,7 +3775,8 @@ async function decodeLine(passedTD, encryptedData) {
 
             var entryType = (fields.type === 'note') ? 'note' : 'login';
             var _hasPk = !!(fields.passkey && fields.passkey.rpId);
-            _entryBadges.set(rowKey, { passkey: _hasPk, note: entryType === 'note' });
+            var _stale = _isStaleFields(fields);
+            _entryBadges.set(rowKey, { passkey: _hasPk, note: entryType === 'note', stale: _stale });
             _decodedFields = {
                 name:       name,
                 type:       entryType,
@@ -3787,6 +3795,7 @@ async function decodeLine(passedTD, encryptedData) {
             _applyDecType(entryType);
             _markPasskeyButton(passedTD, _hasPk);
             _markNoteButton(passedTD, entryType === 'note');
+            _markStaleButton(passedTD, _stale);
             _setDecModified();
             _renderDecExtras();
             _renderDecPasskey();
@@ -3857,7 +3866,7 @@ function _revealCachedV5Buttons() {
             btn.classList.remove('v5-locked');
             btn.style.display = '';
             var _b = _entryBadges.get(rowKey);
-            if (_b) { _markPasskeyButton(btn, _b.passkey); _markNoteButton(btn, _b.note); }
+            if (_b) { _markPasskeyButton(btn, _b.passkey); _markNoteButton(btn, _b.note); _markStaleButton(btn, _b.stale); }
         }
     });
     _sortEntryGrid();
@@ -3916,6 +3925,23 @@ function _markNoteButton(btn, isNote) {
     if (!btn) return;
     if (isNote) { btn.classList.add('entry-note'); btn.dataset.note = '1'; }
     else        { btn.classList.remove('entry-note'); delete btn.dataset.note; }
+}
+// Mark/unmark an entry button as stale (a ⏳ badge via .entry-stale). Idempotent.
+// Uses .entry-lbl::before (passkey/note already occupy ::after, and an entry can
+// be both stale and a passkey, so the two badges must not share a pseudo-element).
+function _markStaleButton(btn, isStale) {
+    if (!btn) return;
+    if (isStale) { btn.classList.add('entry-stale'); btn.dataset.stale = '1'; }
+    else         { btn.classList.remove('entry-stale'); delete btn.dataset.stale; }
+}
+// True if an entry's password has not changed in over _PW_AGE_WARN_DAYS — the same
+// staleness rule Audit uses. Notes have no password, so they are never stale, and
+// an entry without a pwModified stamp can't be aged (treated as not stale).
+function _isStaleFields(fields) {
+    if (!fields || fields.type === 'note') return false;
+    if (typeof fields.pwModified !== 'number') return false;
+    var ageCut = Math.floor(Date.now() / 1000) - _PW_AGE_WARN_DAYS * 86400;
+    return fields.pwModified < ageCut;
 }
 // Reshape the decode panel for the decoded entry's type: a secure note hides the
 // Username/2FA and Password/Modified rows (it has neither). Called on every decode
@@ -4056,11 +4082,13 @@ async function _revealAllV5Names(pw, pw2) {
                 if (gen !== _revealGen) return false;
                 _searchText.set(rowKey, _searchIndex(f));
                 var _pk = !!(f.passkey && f.passkey.rpId), _nt = f.type === 'note';
-                _entryBadges.set(rowKey, { passkey: _pk, note: _nt });
-                // Flag passkey / secure-note entries in the grid (payload already
-                // decrypted here, so the badge costs no extra Argon2id).
+                var _st = _isStaleFields(f);
+                _entryBadges.set(rowKey, { passkey: _pk, note: _nt, stale: _st });
+                // Flag passkey / secure-note / stale entries in the grid (payload
+                // already decrypted here, so the badge costs no extra Argon2id).
                 _markPasskeyButton(btn, _pk);
                 _markNoteButton(btn, _nt);
+                _markStaleButton(btn, _st);
             } catch (_) {
                 if (gen !== _revealGen) return false;
                 /* wrong key / corrupt — leave unindexed */
@@ -4229,7 +4257,7 @@ async function saveEntry() {
         // seed the @-search index (the record is already decrypted here).
         _v5Names.set(record, v.name);
         _searchText.set(record, _searchIndex(fields));
-        _entryBadges.set(record, { passkey: !!(fields.passkey && fields.passkey.rpId), note: fields.type === 'note' });
+        _entryBadges.set(record, { passkey: !!(fields.passkey && fields.passkey.rpId), note: fields.type === 'note', stale: _isStaleFields(fields) });
         var responseText = await _postEntry(record);
         var wasEditing = _editRecord !== null;
         _editRecord = null; _editSnapshot = null;
@@ -4466,9 +4494,27 @@ function _csvParse(text) {
     return rows;
 }
 
-// Quote one CSV field (always-quote — valid and simplest; doubles ").
+// Quote one CSV field (always-quote — valid and simplest; doubles "). Also
+// neutralizes spreadsheet formula / CSV injection: a value whose first visible
+// character is = + - @ (or a leading tab/CR/LF that Excel trims away to expose
+// the next one) is evaluated as a formula by Excel / LibreOffice / Sheets when
+// the exported file is reopened — e.g. =HYPERLINK(...) or =cmd|... — which can
+// exfiltrate data or run commands. Quoting alone does NOT stop this (Excel still
+// evaluates "=..."). Prefixing such values with an apostrophe makes the
+// spreadsheet import them as literal text; _csvUnguard() strips it back off on
+// import so an export→import round-trip stays lossless.
 function _csvField(v) {
-    return '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"';
+    var s = String(v == null ? '' : v);
+    if (/^[=+\-@\t\r\n]/.test(s)) s = "'" + s;
+    return '"' + s.replace(/"/g, '""') + '"';
+}
+
+// Reverse of the _csvField formula guard: drop a single leading apostrophe only
+// when it directly shields a formula-trigger character, so a value we (or another
+// tool) defanged on export imports verbatim. A legitimate leading apostrophe in
+// front of any other character is left untouched.
+function _csvUnguard(s) {
+    return /^'[=+\-@\t\r\n]/.test(s) ? s.slice(1) : s;
 }
 
 // Export columns. `extra` carries the custom-fields array as JSON so our own
@@ -4622,7 +4668,7 @@ async function _importCsvFile(file) {
     }
 
     function cell(r, key) {
-        return (col[key] !== undefined && r[col[key]] != null) ? String(r[col[key]]) : '';
+        return (col[key] !== undefined && r[col[key]] != null) ? _csvUnguard(String(r[col[key]])) : '';
     }
     var nowSec = Math.floor(Date.now() / 1000);
     var parsed = [], skipped = 0;
@@ -5415,6 +5461,14 @@ async function _reencryptVault(opts) {
     try { _applyServerResponse(responseText); } catch (_) { location.reload(); return { reloaded: true }; }
     _revealCachedV5Buttons();
     _signAfterWrite();
+    // Old-key ciphertext cleanup: `trash` still holds records encrypted under the
+    // pre-change passwords/cost. After a password change that is exactly the
+    // material the change was meant to retire, and in both flows restoring such a
+    // record would re-add an entry the current keys can no longer decrypt (a
+    // trap). Empty it now, best-effort — the re-encrypt itself already committed.
+    // (Server-side bak/ also retains pre-change snapshots for up to
+    // VAULT_BAK_MAX_AGE_DAYS; the callers surface that in their status line.)
+    _xhrPost('purge_trash=__all__').catch(function() {});
     return { reloaded: false };
 }
 
@@ -5459,7 +5513,12 @@ async function changeMasterPasswords() {
         });
         say('');
         toggleChangePw();
-        showToast('Master passwords changed — ' + total + ' entries re-encrypted');
+        // Trash was emptied by _reencryptVault (old-key records); bak/ is
+        // server-side only, so tell the operator it still holds old-key copies.
+        showToast('Master passwords changed — ' + total + ' entries re-encrypted. Trash emptied; '
+                  + 'server bak/ keeps pre-change backups readable with the OLD passwords for up '
+                  + 'to 60 days (VAULT_BAK_MAX_AGE_DAYS) — delete them if those are compromised.',
+                  { duration: 12000 });
     } catch (e) {
         if (e.stale) {
             say('The vault changed while re-encrypting — nothing was modified. Close, reload, and retry.');
@@ -5651,7 +5710,11 @@ async function changeKdfParams() {
         if (r.reloaded) return;
         say('');
         toggleChangeKdf();
-        showToast('KDF parameters changed — ' + total + ' entries re-encrypted');
+        // Trash was emptied by _reencryptVault: its records were encrypted at the
+        // OLD cost, so restoring one would fail to decrypt at the new params.
+        showToast('KDF parameters changed — ' + total + ' entries re-encrypted. Trash emptied '
+                  + '(old-cost records); server bak/ keeps pre-change backups up to 60 days.',
+                  { duration: 8000 });
     } catch (e) {
         _vaultKdf = oldKdf;        // nothing committed — restore the active cost
         if (e.stale) {
@@ -5704,23 +5767,30 @@ function _clearVaultTools() {
 }
 
 // ============================================================
-// Vault integrity manifest (vm1)
+// Vault integrity manifest (vm2; vm1 still verified for migration)
 //
 // A keyed signature over the whole record set, stored server-side as the
 // `manifest` file and embedded in index.html (#vault-manifest):
 //
-//   vm1|salt1HEX|salt2HEX|revision|timestamp|hmacHEX
+//   vm2|salt1HEX|salt2HEX|revision|timestamp|kdf|hmacHEX   (current)
+//   vm1|salt1HEX|salt2HEX|revision|timestamp|hmacHEX       (legacy, still parsed)
 //
-// hmac = HMAC-SHA-256(vaultKey, "vm1|salt1|salt2|revision|timestamp"
+// hmac = HMAC-SHA-256(vaultKey, "vm2|salt1|salt2|revision|timestamp|kdf"
 //                              + "\n" + sortedRecords.join("\n"))
 // vaultKey = HKDF(Argon2id(pw1,salt1) || Argon2id(pw2,salt2), 'v6|manifest|hmac')
 //
+// vm2 binds `kdf` (the vault-wide Argon2id cost "a2id|m|t|p") into the signature,
+// so a server that swaps the served #vault-kdf after signing is detected — both
+// at verify time (the cost mismatch) and at load via _checkKdfBinding (password-
+// free). The manifest keys derive at the *signed* cost, so verification does not
+// trust the embedded params the server controls.
+//
 // The server stores it opaquely and can never forge it (no passwords). Verified
 // on unlock (after reveal-all); re-signed automatically after every successful
-// write. `revision` is monotonic — each device keeps a high-water mark in
-// localStorage, so serving an older-but-validly-signed vault (rollback) is
+// write (always as vm2). `revision` is monotonic — each device keeps a high-water
+// mark in localStorage, so serving an older-but-validly-signed vault (rollback) is
 // detected too. Detection only: a compromised server can still serve modified
-// JS — this guards `lines` integrity, not the code itself.
+// JS — this guards `lines`/params integrity, not the code itself.
 // ============================================================
 
 var _manifest    = null;    // current manifest string, as served
@@ -5740,15 +5810,37 @@ function _revSet(n) {
     try { localStorage.setItem(_revStoreKey(), String(n)); } catch (_) {}
 }
 
+// Accepts both manifest versions:
+//   vm1  | salt1 | salt2 | revision | timestamp | hmac            (legacy, 6 fields)
+//   vm2  | salt1 | salt2 | revision | timestamp | kdf | hmac      (7 fields; binds the cost)
+// vm2 carries the Argon2id params it was signed under, so verification can derive
+// at the *signed* cost (decoupled from the possibly-tampered embedded #vault-kdf)
+// and flag a server that swapped the served params. vm1 is still parsed so a vault
+// signed before this change keeps verifying; the next write re-signs it as vm2.
 function _parseManifest(s) {
     if (typeof s !== 'string' || s === '') return null;
     var p = s.split('|');
-    if (p.length !== 6 || p[0] !== 'vm1') return null;
-    if (!/^[0-9a-f]{64}$/.test(p[1]) || !/^[0-9a-f]{64}$/.test(p[2])) return null;
-    if (!/^\d{1,15}$/.test(p[3])    || !/^\d{1,15}$/.test(p[4]))    return null;
-    if (!/^[0-9a-f]{64}$/.test(p[5])) return null;
-    return { salt1Hex: p[1], salt2Hex: p[2], revision: parseInt(p[3], 10),
-             timestamp: parseInt(p[4], 10), hmacHex: p[5] };
+    if (p[0] === 'vm1') {
+        if (p.length !== 6) return null;
+        if (!/^[0-9a-f]{64}$/.test(p[1]) || !/^[0-9a-f]{64}$/.test(p[2])) return null;
+        if (!/^\d{1,15}$/.test(p[3])    || !/^\d{1,15}$/.test(p[4]))    return null;
+        if (!/^[0-9a-f]{64}$/.test(p[5])) return null;
+        return { version: 'vm1', salt1Hex: p[1], salt2Hex: p[2], revision: parseInt(p[3], 10),
+                 timestamp: parseInt(p[4], 10), kdfStr: null, hmacHex: p[5] };
+    }
+    if (p[0] === 'vm2') {
+        // The kdf field is itself "a2id|m|t|p" (4 pipe-separated tokens), so a vm2
+        // manifest splits into 10 fields; the kdf occupies indices 5–8.
+        if (p.length !== 10) return null;
+        if (!/^[0-9a-f]{64}$/.test(p[1]) || !/^[0-9a-f]{64}$/.test(p[2])) return null;
+        if (!/^\d{1,15}$/.test(p[3])    || !/^\d{1,15}$/.test(p[4]))    return null;
+        var kdfStr = p.slice(5, 9).join('|');
+        if (!_parseKdf(kdfStr))           return null;
+        if (!/^[0-9a-f]{64}$/.test(p[9])) return null;
+        return { version: 'vm2', salt1Hex: p[1], salt2Hex: p[2], revision: parseInt(p[3], 10),
+                 timestamp: parseInt(p[4], 10), kdfStr: kdfStr, hmacHex: p[9] };
+    }
+    return null;
 }
 
 // Records in canonical server form: trailing line index stripped, sorted —
@@ -5777,10 +5869,17 @@ function _constTimeHexEq(a, b) {
     return diff === 0;
 }
 
-async function _manifestHmacHex(pw, pw2, salt1Hex, salt2Hex, revision, timestamp, records) {
+// kdfStr selects the manifest version and the cost the manifest keys derive at:
+//   null   → legacy vm1: derive at the active _vaultKdf, sign "vm1|s1|s2|rev|ts".
+//   string → vm2: derive at the params named by kdfStr (its own declared cost) and
+//            sign "vm2|s1|s2|rev|ts|kdf". Deriving at the declared cost is what
+//            lets a verifier check a vm2 manifest without trusting the embedded
+//            #vault-kdf the server can tamper.
+async function _manifestHmacHex(pw, pw2, salt1Hex, salt2Hex, revision, timestamp, kdfStr, records) {
+    var kdf = kdfStr ? (_parseKdf(kdfStr) || _vaultKdf) : _vaultKdf;
     var mks = await Promise.all([
-        deriveMasterKey(pw,  hexToBytes(salt1Hex)),
-        deriveMasterKey(pw2, hexToBytes(salt2Hex))
+        deriveMasterKey(pw,  hexToBytes(salt1Hex), kdf),
+        deriveMasterKey(pw2, hexToBytes(salt2Hex), kdf)
     ]);
     var ikm = new Uint8Array(64);
     ikm.set(mks[0], 0);
@@ -5789,8 +5888,10 @@ async function _manifestHmacHex(pw, pw2, salt1Hex, salt2Hex, revision, timestamp
     var ck = await crypto.subtle.importKey(
         'raw', keyBytes, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']
     );
-    var msg = 'vm1|' + salt1Hex + '|' + salt2Hex + '|' + revision + '|' + timestamp
-            + '\n' + records.join('\n');
+    var header = kdfStr
+        ? 'vm2|' + salt1Hex + '|' + salt2Hex + '|' + revision + '|' + timestamp + '|' + kdfStr
+        : 'vm1|' + salt1Hex + '|' + salt2Hex + '|' + revision + '|' + timestamp;
+    var msg = header + '\n' + records.join('\n');
     var sig = await crypto.subtle.sign('HMAC', ck, _TE.encode(msg));
     return bytesToHex(new Uint8Array(sig));
 }
@@ -5827,6 +5928,22 @@ function _setIntegrityBadge(cls, text) {
     _setKeyFieldsLocked(cls === 'vi-ok');
 }
 
+// Password-free tamper check, run at load. A vm2 manifest names the Argon2id cost
+// it was signed under; if the served #vault-kdf (what the client will actually
+// derive at) no longer matches, the server altered the cost after signing. Worth
+// flagging up front because a downgraded cost also makes every record fail to
+// decrypt — which would otherwise read as a wrong password, not as tampering. No
+// password is needed: it is a plain string compare of two embedded values.
+function _checkKdfBinding() {
+    var m = _parseManifest(_manifest);
+    if (!m || m.version !== 'vm2') return;
+    if (m.kdfStr !== _kdfToString(_vaultKdf)) {
+        _setIntegrityBadge('vi-fail', '✖ KDF parameters altered — signed under ' + m.kdfStr
+            + ', served as ' + _kdfToString(_vaultKdf));
+        showToast('Vault KDF parameters were altered');
+    }
+}
+
 // Verify the served manifest against the records on the page. Called after a
 // successful reveal-all (the only point where both passwords are known-good).
 async function _verifyManifest(pw, pw2) {
@@ -5848,7 +5965,7 @@ async function _verifyManifest(pw, pw2) {
     }
     var h;
     try {
-        h = await _manifestHmacHex(pw, pw2, m.salt1Hex, m.salt2Hex, m.revision, m.timestamp, records);
+        h = await _manifestHmacHex(pw, pw2, m.salt1Hex, m.salt2Hex, m.revision, m.timestamp, m.kdfStr, records);
     } catch (_) {
         return;   // derivation aborted (lock mid-check) — leave badge untouched
     }
@@ -5857,6 +5974,16 @@ async function _verifyManifest(pw, pw2) {
     if (!_constTimeHexEq(h, m.hmacHex)) {
         _setIntegrityBadge('vi-fail', '✖ CHECK FAILED — Rev ' + m.revision + ' signature fail');
         showToast('Vault integrity check FAILED');
+        return;
+    }
+    // vm2 binds the Argon2id cost it was signed under. The HMAC above verified at
+    // that *declared* cost; if the cost the client will actually use (the embedded
+    // #vault-kdf → _vaultKdf) differs, the server changed the served params after
+    // signing — a downgrade/tamper the per-record AEAD can't catch.
+    if (m.version === 'vm2' && m.kdfStr !== _kdfToString(_vaultKdf)) {
+        _setIntegrityBadge('vi-fail', '✖ KDF parameters altered — signed under ' + m.kdfStr
+            + ', served as ' + _kdfToString(_vaultKdf));
+        showToast('Vault KDF parameters were altered');
         return;
     }
     if (m.revision < stored) {
@@ -5881,9 +6008,11 @@ async function _signVault(pw, pw2) {
     // Stay monotonic past a restore: never sign below this device's high-water mark.
     var stored = _revGet();
     if (stored >= revision) revision = stored + 1;
-    var ts   = Math.floor(Date.now() / 1000);
-    var hmac = await _manifestHmacHex(pw, pw2, salt1Hex, salt2Hex, revision, ts, records);
-    var manifest = ['vm1', salt1Hex, salt2Hex, String(revision), String(ts), hmac].join('|');
+    var ts     = Math.floor(Date.now() / 1000);
+    // Bind the active vault-wide cost into the signature (always sign as vm2).
+    var kdfStr = _kdfToString(_vaultKdf);
+    var hmac = await _manifestHmacHex(pw, pw2, salt1Hex, salt2Hex, revision, ts, kdfStr, records);
+    var manifest = ['vm2', salt1Hex, salt2Hex, String(revision), String(ts), kdfStr, hmac].join('|');
     var expect   = await _sha256Hex(records.join('\n'));
     await _xhrPost('sign=1&expect_hash=' + expect + '&manifest=' + encodeURIComponent(manifest));
     _manifest = manifest;
@@ -6784,17 +6913,7 @@ function retestCrypto() {
 // Full lock-and-clear: wipes key fields + caches, hides all decoded data, closes
 // any open modal, and toasts "Locked". Shared by double-Escape and the X hotkey.
 function _lockAndClearVault() {
-    _resetKeyFields();
-    _mkCache.clear();
-    _terminateArgonPool();
-    resetInactivityTimer();
-    clearDisplay();
-    _editRecord = null; _editSnapshot = null;
-    document.getElementById('newentry').style.display         = 'none';
-    document.getElementById('passwordSettings').style.display = 'none';
-    document.getElementById('newentry-title').textContent     = 'New Entry';
-    _clearClipboardIfDirty();
-    _relockV5Entries();
+    _lockCore();
     if (document.getElementById('about-overlay').classList.contains('open')) closeAbout();
     if (document.getElementById('search-overlay').classList.contains('open')) hideSearch();
     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -6950,17 +7069,7 @@ document.addEventListener('keydown', function(e) {
 // ============================================================
 
 function performAutoLock() {
-    _resetKeyFields();
-    _mkCache.clear();
-    _terminateArgonPool();
-    resetInactivityTimer();
-    clearDisplay();
-    _editRecord = null; _editSnapshot = null;
-    document.getElementById('newentry').style.display         = 'none';
-    document.getElementById('passwordSettings').style.display = 'none';
-    document.getElementById('newentry-title').textContent     = 'New Entry';
-    _clearClipboardIfDirty();
-    _relockV5Entries();
+    _lockCore();
     showToast('Locked due to inactivity');
 }
 
@@ -7049,6 +7158,7 @@ var _clickActions = {
     'open-about':        function(el) { openAbout(); },
     'toggle-theme':      function(el) { toggleTheme(); },
     'generate':          function(el) { doGenerate(); },
+    'set-gen-mode':      function(el) { _setGenMode(); },
     'scan-qr':           function(el) { scanQRCode(); },
     'show-pw-settings':  function(el) { showPWSettings(); },
     'cancel-entry':      function(el) { cancelEntry(); },
@@ -7291,6 +7401,9 @@ document.addEventListener('DOMContentLoaded', function() {
     // Pick up the integrity manifest embedded by post.php (verified on unlock).
     var mEl = document.getElementById('vault-manifest');
     _manifest = (mEl && mEl.dataset.manifest) ? mEl.dataset.manifest : null;
+    // Password-free early tamper check: catches a server that swapped the served
+    // KDF cost after signing, even before (and when) records fail to decrypt.
+    _checkKdfBinding();
     window.scrollTo(0, 0);
     document.getElementById('aeskey').focus();
     _initServiceWorker();
@@ -7573,7 +7686,7 @@ async function _bulkTagApply() {
         pairs.forEach(function(p) {
             _v5Names.set(p.newRec, p.name);
             _searchText.set(p.newRec, _searchIndex(p.fields));
-            _entryBadges.set(p.newRec, { passkey: !!(p.fields.passkey && p.fields.passkey.rpId), note: p.fields.type === 'note' });
+            _entryBadges.set(p.newRec, { passkey: !!(p.fields.passkey && p.fields.passkey.rpId), note: p.fields.type === 'note', stale: _isStaleFields(p.fields) });
         });
         _exitSelectMode();
         clearDisplay();
@@ -7632,6 +7745,9 @@ function _randomInt(n) {
 }
 
 function doGenerate() {
+    // Generator has two modes; the passphrase (diceware) mode is a separate path.
+    var pm = document.getElementById('gen-mode-phrase');
+    if (pm && pm.checked) { doGeneratePassphrase(); return; }
     var charset = '';
     CHARACTER_SETS.forEach(function(entry, i) {
         if (document.getElementById('charset-' + i).checked) charset += entry[2];
@@ -7665,6 +7781,51 @@ function doGenerate() {
     document.getElementById('copy-button').disabled = false;
 }
 
+// Flatten the space-joined wordlist chunks into a word array once, on first use
+// (the list is ~7.8k words, so we avoid the work until the passphrase mode runs).
+var _wordlistCache = null;
+function _wordlist() {
+    if (!_wordlistCache) _wordlistCache = _WORDLIST_CHUNKS.join(' ').split(' ');
+    return _wordlistCache;
+}
+
+// Diceware / passphrase generator. Each word is an independent uniform draw from
+// the wordlist via _randomInt (same rejection-sampled CSPRNG as the char mode), so
+// entropy is exactly count × log2(listSize) — plus log2(10) for an appended digit.
+function doGeneratePassphrase() {
+    var words = _wordlist();
+    var count = parseInt(document.getElementById('word-count').value, 10);
+    if (!count || count < 1 || count > 100) { alert('Invalid word count'); return; }
+    var sep    = document.getElementById('word-sep').value;
+    var caps   = document.getElementById('word-caps').checked;
+    var addNum = document.getElementById('word-num').checked;
+
+    var tokens = [];
+    for (var i = 0; i < count; i++) {
+        var w = words[_randomInt(words.length)];
+        if (caps) w = w.charAt(0).toUpperCase() + w.slice(1);
+        tokens.push(w);
+    }
+    var extraBits = 0;
+    if (addNum) { tokens.push(String(_randomInt(10))); extraBits = Math.log2(10); }
+
+    currentPassword = tokens.join(sep);
+    document.getElementById('password').value = currentPassword;
+    updatePWStrength();
+    var entropy = Math.log2(words.length) * count + extraBits;
+    document.getElementById('statistics').textContent =
+        count + ' words from a ' + words.length + '-word list,  Entropy ≈ ' +
+        entropy.toFixed(1) + ' bits';
+    document.getElementById('copy-button').disabled = false;
+}
+
+// Toggle the generator panel between character and passphrase option blocks.
+function _setGenMode() {
+    var phrase = document.getElementById('gen-mode-phrase').checked;
+    document.getElementById('gen-chars').style.display  = phrase ? 'none' : '';
+    document.getElementById('gen-phrase').style.display = phrase ? '' : 'none';
+}
+
 function initCrypto() {
     var el = document.getElementById('crypto-getrandomvalues-entropy');
     if (!el) return;
@@ -7674,3 +7835,433 @@ function initCrypto() {
         el.textContent = '⚠︎ NOT available — do not use this browser for password generation';
     }
 }
+
+// EFF-style diceware wordlist: 7776 words (12.925 bits/word), derived from the
+// system dictionary (american-english), filtered to [a-z]{4,6}, deduped, profanity
+// removed. NOT the EFF list. Stored as space-joined chunks to keep the source
+// compact; _WORDLIST flattens them once on first use. See doGeneratePassphrase().
+var _WORDLIST_CHUNKS = [
+  'abaci aback abacus abaft abase abash abate abbey abbot abbr abeam abed abet abets abhor abhors abide able',
+  'abler ably abode abort aborts about above abuse abuses abut abuts abuzz abyss acct aced aces acetic ache',
+  'ached aches achoo achy acid acids acing acme acmes acne acorn acre acres acrid acted active actor acts acute',
+  'adage adapt added addend adder addle adds adept adieu adjoin adman admen admin admit adobe adopt adore adorn',
+  'adorns adult advt adze adzes aegis aeon aeons aerate aerie aery afar affix afire aflame afoot afoul after',
+  'again agape agar agate agave aged agent ages aghast agile aging agism aglow agog agony agree ague ahead ahem',
+  'ahoy aide aided aides aids ailed ails aimed aims aired airing airs airy aisle ajar akin alarm alas albs',
+  'album alder alders alert ales alga algae alias alibi alien align alike aline alit alive allay allege alley',
+  'allot allow alloy ally almost alms aloe aloes aloft aloha alone along aloof aloud alpha also altar alter',
+  'altho alto altos alts alum alums amass amaze amazed amber amble ameba ameer amen amend amends amid amigo',
+  'amino amir amirs amiss amity ammo amok among amour ample amply amps ampul ampuls amuck amuse anew angel',
+  'anger angina angle angry angst anime anion anise ankh ankhs ankle anneal annex annoy annul anode anon anons',
+  'ante anted antes anther anti antic antis ants anvil aorta apace apart apathy aped apes apex aphid aping',
+  'appal appeal apple apply apps apron apse apses apter aptly aqua aquae aquas arbor arcane arced arch arcs',
+  'ardor area areas arena arenas ares argon argot argue aria arias arid arise arks armed armies armor arms army',
+  'aroma arose array arrays arrow arson arts artsy arty ascent ascot ashed ashen ashes ashy aside asked askew',
+  'asks asleep aspen aspic asps assay asset assets assn assoc asst aster astir astral atlas atoll atom atoms',
+  'atone atop atria attach attar attic atty audio audit auger augers aught augur auks aunt aunts aura aurae',
+  'aural auras auto autos avail avast avdp avenge aver avers avert avian avid avoid avow avows await awake',
+  'awaked award aware awash away awed awes awful awing awls awoke awol awry axed axes axial axing axiom axis',
+  'axle axles axon axons ayes azure azures baaed baas babe babel babes baby back backs backup bacon bade badge',
+  'badly bagel baggy bags bail bails bait baits baize bake baked baker bakery bakes bald balds bale baled bales',
+  'balk balks balky ball ballot balls balm balms balmy balsa banal band bands bandy bane banes bang bangs bani',
+  'banish banjo bank banks banns bans barb barbed barbs bard bards bare bared barer bares barf barfs barge bark',
+  'barker barks barn barns baron bars barter basal base based baser bases bash basic basil basin basis bask',
+  'basket basks bass bassi basso bast baste batch bate bated bates bath bathe baths batik bating baton bats',
+  'batty baud bauds bawdy bawl bawls bayed bayou bays beach beacon bead beads beady beak beaks beam beams bean',
+  'beans bear beard bears beast beat beaten beats beau beaus beaux bebop beck becks bedded beds beech beef',
+  'beefs beefy been beep beeps beer beers bees beet beets befall befit befog began begat beget begin begone',
+  'begot begs begun beige being belay belch belfry belie bell belle bells belly below belt belts bench bend',
+  'bender bends bent bents beret berg bergs berm berms berry berth beryl beset besom besoms besot best bests',
+  'beta betas bets betted bevel bevy bias bible bibles bibs bicep biddy bide bided bides bidet bids bier biers',
+  'biff biffs biggie bight bigot bike biked biker bikes bile bilge bilk bilks bill billet bills billy bimbo',
+  'bind binds binge bingo bins biped bipeds birch bird birds birth bison bite bites bitmap bits blab blabs',
+  'black blade blah blame bland blank blanks blare blast blat blats blaze bldg bleak bleat bleats bled bleed',
+  'bleep blend blent bless blest blew blimp blind bling blink blintz blip blips bliss blitz bloat blob blobs',
+  'bloc block blocs blog blogs blond blood bloom blot blotch blots blow blown blows blue blued bluer blues',
+  'bluff blunt blunts blur blurb blurs blurt blush blvd boar board boars boas boast boat boats bobby bobcat',
+  'bobs bode boded bodes body boga bogey boggy bogie bogied bogon bogs bogus bogy boil boils boink bola bolas',
+  'bold bole boles boll bolls bolt bolts bomb bomber bombs bond bonds bone boned boner bones boney bong bongo',
+  'bongs bonnie bonny bonus bony booby booed book books boom booms boon boons boor boors boos boost boot booted',
+  'booth boots booty booze boozy bops borax bore bored borer bores boring born borne boron bosh bosom boss',
+  'bossy bosun botch both bottom bough bound bout bouts bowed bowel bower bowing bowl bowls bows boxed boxen',
+  'boxer boxes boys bozo bozos brace braces bract brad brads brag brags braid brain brake bran brand brandy',
+  'bras brash brass brat brats brave bravo brawl brawn bray brays brazen bread break bred breed brew brewed',
+  'brews briar bribe brick bride brief briefs brier brig brigs brim brims brine bring brink briny brisk broad',
+  'broil broke broken brood brook broom broth brow brown brows browse bruin brunt brush brusk brute buck bucket',
+  'bucks buddy budge buds buff buffs bugged buggy bugle bugs build built bulb bulbs bulge bulgy bulk bulks',
+  'bulky bull bulls bully bumble bump bumps bumpy bums bunch bung bungs bunk bunker bunks bunny buns bunt bunts',
+  'buoy buoys burg burgs buries burka burly burn burns burnt burp burps burr burro burrs burs burst bursts bury',
+  'busby bused buses bush bushy buss bussed bust busts busy butch buts butt butte button butts buxom buyer buys',
+  'buzz byes bylaw byline byte bytes byway cabal cabby cabin cabins cable cabs cacao cache cacti caddy cadet',
+  'cadets cadge cadre cads cage caged cages cagey cagy cairn cajole cake caked cakes calf calfs calif calk',
+  'calks call calls calm calmed calms calve calyx came camel cameo camp camped camps campy cams canal candle',
+  'candy cane caned canes canny canoe canon canons cans cant canto cants cape caped caper capes caplet capon',
+  'caps carat carbs card cards care cared career cares caret cargo carol carom carp carped carpi carps carry',
+  'cars cart carts carve carver case cased cases cash cask casks cast caste caster casts catch cater catnap',
+  'cats catty caulk cause caused cave caved caves cavil cawed caws cease ceased cedar cede ceded cedes cell',
+  'celli cello cells cent center cents chad chads chafe chaff chain chair chaise chalk champ chant chanty chaos',
+  'chap chaps chapt char charm chars chart chary chase chasm chat chats chatty cheap cheat check cheek cheep',
+  'cheer chef chefs chem cherry chess chest chew chews chewy chic chick chid chide chides chief child chile',
+  'chili chill chime chimp chin china chink chino chinos chins chip chips chirp chit chits chive chock choir',
+  'choke choker chomp chop chops chord chore chorus chose chow chows chuck chug chugs chum chump chums chunk',
+  'church churl churn chute cider cigar cilia cinch cinema circa cite cited cites city civet civets civic civil',
+  'clack clad claim clam clamp clams clan clang clank clans clap claps claret clash clasp class claw claws clay',
+  'clean clear cleat clef clefs cleft clench clerk clew clews click cliff clii climb climbs clime cling clink',
+  'clip clips clipt clit clits clix cloak clock clocks clod clods clog clogs clomp clone clop clops close clot',
+  'cloth clots cloud clouds clout clove clown cloy cloys club clubs cluck clue clued clues clump clumps clung',
+  'clunk clvi clvii clxi clxii clxiv clxix clxvi coach coal coals coast coat coats coax coaxed cobra cobs cocci',
+  'cocky cocoa cocoas coda codas code coded codes codex cods coed coeds coffer cogs coif coifs coil coils coin',
+  'coins coitus coke coked cokes cola colas cold colds colic colon color cols colt colts coma comas comb combat',
+  'combo combs come comer comes comet comfy comic comm comma commas compo conch condo condos cone cones conga',
+  'conic conj conk conks cons cont contd convey cooed cook cooks cooky cool cools coons coop cooped coops coos',
+  'coot coots cope coped copes copra cops copse copses copy coral cord cords core cored cores cork corks corm',
+  'corms corn corner corns corny corp corps cosign cost costs cosy cote cotes cots couch cough coughs could',
+  'count coup coupe coups court cove coven cover covers coves covet covey cowed cower cowl cowls cows coyer',
+  'coyly cozen cozens cozy crab crabs crack craft crag crags cram cramp cramps crams crane crank crape craps',
+  'crash crass crate crater crave craw crawl craws cray crays craze crazy creak creaks cream credo creed creek',
+  'creel creels creep crepe crept cress crest crew crews crib cribs crick cried crier cries crime crimes crimp',
+  'crisp croak croci crock crofts crone crony crook croon crop crops cross croup crow crowd crown crows crud',
+  'cruddy crude cruel cruet cruft crumb crush crust crusts crux crypt cube cubed cubes cubic cubit cubs cuckoo',
+  'cuds cued cues cuff cuffs cuing cull culls cult cults cumin cums cunts cupid cupola cups curb curbs curd',
+  'curds cure cured curer cures curie curio curl curled curls curly curry curs curse curst curt curve curves',
+  'curvy cushy cusp cusps cuss cute cuter cuts cutter cutup cycle cynic cyst cysts czar czars dabble dabs dacha',
+  'daddy dado dados dads daffy daft daily dairy dais daisy dale dales dally damage dame dames damns damp damps',
+  'dams dance danced dandy dank dapple dare dared dares dark darn darns dart darts dash data date dated dates',
+  'dative datum daub daubs daunt davit dawn dawns days daze dazed dazes dded dding dead deaden deaf deal deals',
+  'dealt dean deans dear dears death deaves debar debit debs debt debts debug debut debuts decaf decal decay',
+  'deck deckle decks decor decoy decry deed deeds deem deems deep deepen deeps deer deers defer defies deft',
+  'defy deice deicer deify deign deism deity delay deli delis dell dells delta delve delved demo demon demos',
+  'demur denial denim dens dense dent dents denude deny depot dept depth deputy derby desk desks despot deter',
+  'detox deuce devil devils dewy dhoti dial dialed dials diary dice diced dices dicey dicky dicta dictum died',
+  'dies diet diets diff diffs digit digs dike diked dikes diking dill dills dilly dime dimer dimes dimly dims',
+  'dine dined diner dines ding dingo dings dingy dining dink dinky dins dint diode dips dire direr direst dirge',
+  'dirk dirks dirt dirty disc disco discs dish disk disks disown diss ditch ditto ditty diva divan divas dive',
+  'dived diver divert dives divot divvy dizzy djinn dock docked docks docs dodge dodgy dodo dodos doer doers',
+  'does doff doffs doggie doggy dogie dogma dogs doily doing dole doled doles doll dolls dolly dolt dolts dome',
+  'domed domes doming done donor dons donut doom doomed dooms door doors dope doped dopes dopey dopy dork dorks',
+  'dorky dorm dorms dory dose dosed doses dote doted dotes doth doting dots dotty doubt dough dour douse douses',
+  'dove doves dowdy dowel down downs downy dowry dowse doyen doze dozed dozen dozes drab drabs draft drafty',
+  'drag drags drain drake dram drama drams drank drape draw drawl drawn draws dray drays dread dream dreams',
+  'dregs dress drew dried drier dries drift drill drily drink drinks drip drips drive droid droll drone drool',
+  'droop droops drop drops dross drove drown drub drubs drug drugs druid druids drum drums drunk dryad dryer',
+  'dryly drys dual dubs ducal ducat duchy duck ducks duct ducts dude duded dudes duds duel dueled duels dues',
+  'duet duets duff duke dukes dull dulls dully duly dumb dummy dump dumps dumpy dunce dune dunes dung dungs',
+  'dunk dunked dunks dunno duns duos dupe duped dupes dusk dusky dust dusts dusty duty duvet dwarf dwarfs dweeb',
+  'dwell dwelt dyed dyer dyers dyes dying dyked dykes each eager eagle earful earl earls early earn earns ears',
+  'earth ease eased easel eases easing east easy eaten eater eats eave eaves ebbed ebbs ebony echo echos ecru',
+  'eddy edema edge edged edger edges edgier edgy edict edify edit edits eels eerie eery effete egged eggs egis',
+  'egos egret eider eight eighth eject eked ekes eking elate elbow elder elect elects elegy elfin elide elite',
+  'elks ells elms elope else elude eluded elves email embed ember emboss emcee emend emery emir emirs emit',
+  'emits emoji emos emote empire empty emus enact endear ended endow ends endue enema enemy engage enjoy ennui',
+  'enrich enrol ensue enter entire entry enure envoy envy eons epic epics epilog epoch epoxy equal equip eras',
+  'erase erect erects ergo ergs erode erred error errs erupt erupts espy essay ester esters etch ether ethic',
+  'ethos euro euros evade evades even evens event ever every eves evict evil evils evoke evolve ewer ewers ewes',
+  'exact exalt exam exams excel excl exec execs exempt exert exes exile exist exit exits exotic expel expo',
+  'expos extant extol extra exude exult eyed eyeful eyes eying fable face faced faces facet facile fact facts',
+  'fade faded fades fads fagot fail fails fain faint fair fairer fairs fairy faith fake faked faker fakes fakir',
+  'fall falls false falter fame famed fancy fang fangs fanny fans farce fare fared fares faring farm farms',
+  'farts fast fasts fatal fate fated fates fating fats fatty fault faun fauna fauns favor fawn fawns faxed',
+  'faxes faxing faze fazed fazes fear fears feast feat feats fecal feds feed feeds feel feeler feels fees feet',
+  'feign feint fell fells felon felt felted felts femur fence fend fends fens feral fern ferns ferric ferry',
+  'fest fests feta fetal fetch feted fetid fetus feud feudal feuds fever fewer fezes fiat fiats fiber fibs',
+  'fiche fiches fief fiefs field fiend fiery fife fifes fifth fifty fight fights figs filch file filed files',
+  'filet fill fills filly film films filmy filter filth final finch find finds fine fined finer fines finis',
+  'finish fink finks finny fins fiord fire fired fires firm firms firs first firth fish fished fishy fist fists',
+  'fitly fits five fiver fives fixed fixer fixes fizz fizzed fizzy fjord flab flack flag flags flail flair flak',
+  'flake flakes flaky flame flan flank flap flaps flare flash flask flat flatly flats flaw flaws flax flay',
+  'flays flea fleas fleck fled flee flees fleet flesh fleshy flew flex flick flied flier flies fling flint',
+  'flints flip flips flirt flit flits float flock floe floes flog flogs flood floor flop flops flora florae',
+  'floss flour flout flow flown flows flub flubs flue flues fluff fluffs fluid fluke fluky flume flung flunk',
+  'flush flute flutes flux flyby flyer foal foals foam foams foamy fobs focal foci focus foes foetal fogey',
+  'foggy fogs fogy foil foils foist fold folds folio folios folk folks folly fond fondu font fonts food foods',
+  'fool fooled fools foot foots fops fora foray force ford fords fore fores forest forge forgo fork forks form',
+  'forms fort forte fortes forth forts forty forum foul fouls found fount four fours fourth fowl fowls foxed',
+  'foxes foxy foyer frack frag frags frail frame franc francs frank frat frats fraud fray frays freak free',
+  'freed freer frees frenzy fresh fret frets friar fried frier fries frill frilly frisk frizz frock frog frogs',
+  'from frond front frost frosty froth frown froze fruit frump frumpy fryer ftps fudge fuel fuels fugue fulcra',
+  'full fulls fully fume fumed fumes fums fund funds fungi funk funks funky funnel funny furl furls furor furry',
+  'furs fury furze fuse fused fuses fuss fusses fussy fusty futon futz fuze fuzed fuzes fuzz fuzzy gabble gabby',
+  'gable gabs gads gaff gaffe gaffs gage gaged gages gaging gags gaily gain gains gait gaits gala galas gale',
+  'gales gall galls galore gals game gamed gamer games gamey gamin gamins gamma gamut gamy gang gangs gape',
+  'gaped gapes gaps garb garbed garbs garter gases gash gasp gasps gassy gate gated gates gaucho gaudy gauge',
+  'gaunt gauze gauzy gave gavel gawk gawks gawky gayer gayly gays gaze gazed gazer gazes gear geared gears',
+  'gecko geed geek geeks geeky gees geese geez geld gelds gelid gels gelt gems gene genes genial genie genii',
+  'genre gens gent gents genus geode germ germs gets getup gewgaw ghost ghoul giant gibe gibed gibes giblet',
+  'giddy gift gifts gigs gild gilds gill gills gilt gilts gimme gimpy ginkgo gins gipsy gird girds girl girls',
+  'girt girth girts gismo gist give given gives gizmo gizmos glad glade glads gland glare glass glaze glazes',
+  'gleam glean glee glen glens glib glide glint glitz gloat gloats glob globe globs gloom glop glory gloss',
+  'glove glow glows glue glued glues gluey gluier glum glut gluts glyph gnarl gnash gnat gnats gnaw gnawn gnaws',
+  'gnome gnus goad goads goal goals goat goatee goats gobs godly gods goes gofer going goiter gold golds golf',
+  'golfs golly gonad gone goner gong gongs gonk gonks gonna gonzo good goodie goods goody gooey goof goofs',
+  'goofy gook gooks goon goons goop goose gore gored gores gorge gorier gorp gorps gorse gory gosh gotta gouge',
+  'gourd gout gouty govern govt gown gowns grab grabs grace grad grade grads graft grail grain gram grams grand',
+  'grands grant grape graph grasp grass grate gratis grave gravy gray grays graze grease great grebe greed',
+  'green greet grep greps grew grey greys grid grids grief grieve grill grim grime grimy grin grind grins grip',
+  'gripe grippe grips grist grit grits groan grog groin grok groks groom grope groped gross group grout grove',
+  'grow grower growl grown grows grub grubs grue gruel grues gruff grunt guano guard guava guavas guess guest',
+  'guff guide guild guile guilt guise gulag gulch gulf gulfs gull gulled gulls gully gulp gulps gumbo gummy',
+  'gums gunk gunny guns guppy gurgle guru gurus gush gushy gust gusto gusts gusty guts gutsy guyed guys guzzle',
+  'gybe gybed gybes gyms gyps gypsy gyro gyros habit hack hacks haft hafts hags haiku hail hailed hails hair',
+  'hairs hairy hake hakes hale haled haler hales half hall halls halo halon halos halt halts halve halved hams',
+  'hand hands handy hang hanger hangs hank hanks hanky happy hard hardy hare hared harem hares haring hark',
+  'harks harm harms harp harps harpy harry harsh hart harts hash hasp hasps haste hasted hasty hatch hate hated',
+  'hater hates hath hats haul hauls haunch haunt have haven haves havoc hawed hawk hawks haws hayed hays hazard',
+  'haze hazed hazel hazes hazy head heads heady heal heals health heap heaps hear heard hears heart heat heath',
+  'heats heave heaved heavy heck hedge heed heeds heel heeled heels heft hefts hefty heir heirs heist held',
+  'helix hello helm helms helot help helps hemmed hemp hems hence henna hens herb herbs herd herds here hereof',
+  'hero heron heros hers hertz hewed hewer hewers hewn hews hexed hexes hick hicks hide hided hides hied hies',
+  'high higher highs hike hiked hiker hikes hill hills hilly hilt hilts hims hind hinds hing hinge hings hint',
+  'hints hipper hippo hippy hips hire hired hires hiss hitch hits hive hived hives hoagy hoard hoards hoary',
+  'hoax hobby hobo hobos hobs hock hocks hods hoed hoeing hoes hogan hogs hoist hokey hokum hold holds hole',
+  'holed holes hollow holly holy home homed homer homes homey homie homy honcho hone honed hones honey honk',
+  'honks honor hooch hood hoods hooey hoof hoofed hoofs hook hooks hooky hoop hoops hoot hootch hoots hope',
+  'hoped hopes hops horde horn hornet horns horse horsy hose hosed hoses host hosts hotel hotkey hotly hound',
+  'hour hours house hove hovel hover howdy howl howled howls hows hubby hubs hued hues huff huffs huffy huge',
+  'huger hugs hula hulas hulk hulks hull hulled hulls human humid humor humped humps hums humus hunch hung hunk',
+  'hunks hunt hunts hurl hurls hurray hurry hurt hurts hush husk husks husky hussy hutch huts hybrid hydra',
+  'hyena hying hymen hymn hymns hype hyped hyper hypes hypo hypos iamb iambs ibex ibexes ibid ibis iced ices',
+  'icier icily icing icky icon icons idea ideal ideas ides idiom idioms idiot idle idled idler idles idly idol',
+  'idols idyl idyll idyls iffy igloo iguana ikon ikons ilks ills illus image imam imams imbed imbue impair',
+  'impel imply imps impugn inane inapt inbox inced inch incite incs incur index induct indue inept inert infer',
+  'infix info inform ingot inked inkier inks inky inlay inlet inner inning inns input inset insole intel inter',
+  'interj into intro inure invert ioctl ions iota iotas irate iris irked irking irks iron irons irony isle',
+  'isles islet isms issue itch itches itchy item items ivies ivory jabot jabs jack jacks jade jaded jades jags',
+  'jaguar jail jails jamb jambs jams japan jape japed japes jarred jars jaunt jawed jaws jays jazz jazzy jeans',
+  'jeep jeeps jeer jeers jeez jehad jell jelled jello jells jelly jerks jerky jest jests jets jetty jewel',
+  'jibbed jibe jibed jibes jibs jiffy jigs jihad jilt jilts jimmy jinn jinni jinns jinx jinxed jive jived jives',
+  'jobs jock jocks joggle jogs john johns join joins joint joist joke joked joker jokes jolly jolt jolts josh',
+  'jostle jots joule joust jowl jowls joyed joys judge judges judo jugs juice juicy julep jumbo jump jumped',
+  'jumps jumpy junco junk junks junky junta juries juror jury just jute juts kabob kale kaolin kapok kaput',
+  'karat karma kayak kazoo kebab kebob keel keels keen keenly keens keep keeps kegs kelp kens kept ketch keto',
+  'keyed keys khaki khan khans kick kicker kicks kicky kiddo kiddy kids kill kills kiln kilns kilo kilos kilt',
+  'kilter kilts kind kinda kinds king kings kink kinks kinky kiosk kiss kissed kite kited kites kith kits kitty',
+  'kiwi kiwis kluge klutz knack knacks knave knead knee kneed kneel knees knell knelt knew knife knit knits',
+  'knobs knock knocks knoll knot knots know known knows koala koan koans kook kooks kooky kopek krone kronor',
+  'kudos kudzu label labor labs lace laced laces lack lacks lacuna lacy lade laded laden lades ladle lads lady',
+  'lager lags laid lain lair lairs laity lake lakes lama lamas lamb lambda lambs lame lamed lamer lames lamp',
+  'lamps lams lance lances land lands lane lanes lank lanky lapel laps lapse larch lard larded lards large',
+  'largo lark larks larva larynx lase lased laser lases lash lass lasso last lasts latch late lately later',
+  'latex lath lathe laths lats latte laud lauds laugh launch lava lawn lawns laws laxer laxly layer layoff lays',
+  'laze lazed lazes lazy leach lead leads leaf leafed leafs leafy leak leaks leaky lean leans leap leaps leapt',
+  'learn leas lease leash least leave leaved ledge leech leek leeks leer leers leery lees left lefts lefty',
+  'legacy legal leggy legit legs legume leis lemma lemme lemon lemur lend lends lens lent leper lept lesion',
+  'less lest lets letup levee level lever levers levy lewd lexer liar liars libel libels lice licit lick licks',
+  'lids lied lief liege lien liens lies lieu life lifer lift lifts light lights like liked liken liker likes',
+  'lilac lilt lilts lily limb limbo limbs lime limed limes limier limit limn limns limo limos limp limps limy',
+  'linden line lined linen liner lines lingo link linker links lint lints lion lions lipid lips lira liras lire',
+  'lisle lisp lisps list listen lists lite liter lithe live lived liven liver livers lives livid llama llano',
+  'load loads loaf loafer loafs loam loamy loan loans loath lobby lobe lobed lobes lobs local loci lock locker',
+  'locks loco locus lode lodes lodge loft lofts lofty loge loges logic login logins logo logon logos logs loin',
+  'loins loll lolls lone loner long longed longs look looks loom looms loon loons loony loop loops loopy loose',
+  'loosen loot loots lope loped lopes lops lord lords lore lorn lorry lose loser loses loss losses lost loth',
+  'lots lotto lotus loud louse lousy lout louts love loved lover loves lowed lower lowers lowly lows loxes',
+  'loyal luau luaus lube lubed lubes lucid luck lucks lucky lucre lugs lull lulls lumber lump lumps lumpy lunar',
+  'lunch lung lunge lungs lupin lupus lurch lure lured lures lurid lurk lurker lurks lush lust lusts lusty lute',
+  'lutes lvii lxii lxiv lxix lxvi lxvii lying lymph lynch lynx lyre lyres lyric lyrics macaw mace maced maces',
+  'macho macro madam made madly madman mads magic magma maid maids mail mails maim maimed maims main mains',
+  'maize major make maker makes male males mall mallet malls malt malts mama mamas mambo mamma mane manes manga',
+  'mange manger mango mangy mania manic manly manna manor mans manse mantel many maple maps maraca march mare',
+  'mares maria mark marks marlin marry mars marsh mart marts masc mascot mash mask masks mason mass mast masts',
+  'match mate mated mates math mating mats matt matte matts matzo matzot maul mauls mauve maven mavin maws',
+  'maxed maxes maxim maybe mayhem mayo mayor maze mazes mead meal meals mealy mean means meant meat meats meaty',
+  'mecca medal media medial medic meek meet meets megs meld melds melody melon melt melts meme memes memo memos',
+  'mend mends menial menu menus meow meows mercy mere meres merge merit merits merry mesa mesas mesh mess messy',
+  'meta metal mete meted meter meters metes metro mewed mewl mewls mews miaow mica mice mickey micra middy',
+  'midge midst mien miens miff miffs might mike miked mikes miking milch mild mile miler miles milf milfs milk',
+  'milks milky mill millet mills mils mime mimed mimes mimic mince mind minds mine mined miner mines mini minim',
+  'minims minis mink minks minor mint mints minty minus minx mire mired mires miring mirth misc misdo miser',
+  'miss missed mist mists misty mite miter mites mitt mitts mixed mixer mixes mkay moan moaned moans moat moats',
+  'mobs mocha mock mocks modal mode model modem modern modes mods mogul moire moist molar molars mold molds',
+  'moldy mole moles moll molls molt molts momma mommy moms money monk monkey monks mono month mooch mood moods',
+  'moody mooed moon moons moor moors moos moose moot moots mope moped mopes mops moral morale moray more mores',
+  'morn morns moron mortar mosey moss mossy most mote motel motes moth moths motif motion motor motto mound',
+  'mount mourn mouse mouser mousy mouth move moved mover moves movie mowed mower mown mows much muck mucked',
+  'mucks mucky mucus muddy muff muffs mufti muggle muggy mugs mulch mule mules mull mulls multi mummy mumps',
+  'munch mung mungs mural murder murk murks murky muse mused muses mush mushy music musk musky muslin muss',
+  'mussy must musts musty mute muted muter mutes mutt mutter mutts myna mynah mynas myrrh myself myth myths',
+  'nabob nabs nacho nacre nadir nags naiad nail nails naive naiver naked name named names nanny nape napes',
+  'nappy naps narc narcs nark narks nary nasal nasty natal native natl natty naval nave navel naves navy nays',
+  'near nears neat neater neath neck necks need needs needy neigh neocon neon nerd nerds nerdy nerve nervy nest',
+  'nests nets neuron never newel newer newly news newsy newt newts next nexus nibs nice nicer nicety niche nick',
+  'nicks niece nifty nigh night nights nimbi nine nines ninja ninny ninth nippy nips nite niter nites nits',
+  'nitwit nixed nixes noble nobly nodal noddy node nodes nods noel noels noes noise noisy nomad nomads nonce',
+  'none nook nooks noon noose nope norm norms north nose nosed noses nosey nosh nosy notary notch note noted',
+  'notes noun nouns nous nova novae novas novel noway nozzle nubs nuder nudge nuke nuked nukes nuking null',
+  'nulls numb numbs nuns nurse nuts nutty nuzzle nylon nymph oafs oaken oaks oakum oared oars oases oasis oaten',
+  'oath oaths oats obese obey obeys obit obits oblong oboe oboes occur ocean ocher ochre octal octane octet',
+  'odder oddly odds odes odium odor odors offal offed offer office offs often ogle ogled ogles ogre ogres ohms',
+  'oiled oils oily oink oinks okay okays okra okras olden older oldie oleo olive olives omega omen omens omit',
+  'omits once ones onion only onset onto onus onyx oops ooze oozed oozes oozing opal opals open opens opera',
+  'opine opium oppose opted optic opts opus oral orals orate orates orbit orbs orcs order ores organ orient',
+  'osier other others otter ouch ought ounce ours oust ousts outdo outed outer outfit outgo outs oval ovals',
+  'ovary oven ovens over overdo overs overt ovoid ovule ovum owed owes owing owlet owls owned owner owns oxbow',
+  'oxen oxide oxides ozone pace paced paces pack packs pact pacts paddy padre padres pads paean pagan page',
+  'paged pager pages paid pail pails pain pains paint pair pairs palate pale paled paler pales pall palls palm',
+  'palms palmy pals palsy pamper panda pane panel panes pang pangs panic pans pansy pant pants panty papa',
+  'papacy papal papas papaw paper paps parch pare pared pares pariah park parka parks parred parry pars parse',
+  'part parts party pasha pass passed past pasta paste pastry pasts pasty patch pate pates path paths patio',
+  'pats patsy patted patty pause pave paved paves pawed pawl pawls pawn pawns paws payday payed payee payer',
+  'pays peace peach peak peaks peal peals pear pearl pearls pears peas pease peat pecan peck pecks pecs pedal',
+  'peed peeing peek peeks peel peels peep peeps peer peers pees peeve pegs pekoe pellet pelt pelts penal pence',
+  'pend pends penes penny pens pent penury peon peons peony peppy peps perch peril perk perks perky perm permed',
+  'perms pert pesky peso pesos pest pests petal petard peter pets petty pewee pews phage phalli phase phial',
+  'phish phlox phone phones phony photo phyla piano piazze pica pick picks picky piece pieced pied pier piers',
+  'pies piety piggy pigmy pigs piing pike piked piker pikers pikes pilaf pilau pilaw pile piled piles pill',
+  'pilled pills pilot pimp pimps pinch pine pined pines ping pings pink pinked pinks pinky pins pint pinto',
+  'pints pinup pious pipe piped piper pipes pipit pippin pips pique pita pitch pith pithy piton pitons pits',
+  'pity pivot pixel pixie pixy pizza place placid plaid plain plait plan plane planet plank plans plant plate',
+  'play plays plaza plazas plea plead pleas pleat pled plied plies plinth plod plods plonk plop plops plot',
+  'plots plow plows ploy ploys pluck plug plugs plum plumb plume plumes plump plums plunk plus plush poach pock',
+  'pocks podded podia pods poem poems poesy poet poets point poise poke poked poker pokes pokey pokeys poky',
+  'polar pole poled poles polio polka polkas poll polls polo pols polyp pomp pond ponds pone pones ponies pony',
+  'pooch pooh poohs pool pools poops poor pope popes poppa poppas poppy pops porch pore pored pores pork port',
+  'ports pose posed poser poses posh posher posit poss posse post posts posy potato pots potty pouch pound pour',
+  'pours pout pouts powder power poxes pram prank prate prawn pray prayer prays preen prep preps pres press',
+  'presto prey preys price pricy pride prides pried pries prig prigs prim prime primp print prior priors prism',
+  'privy prize probe prod prods prof profit profs prom promo proms pron prone prong proof prop props pros prose',
+  'prosy proton proud prove prow prowl prows proxy prude prune psalm pshaw pshaws psst psych pubic pubs puck',
+  'pucks pudgy puff puffin puffs puffy pugs puke puked pukes pull pulls pulp pulps pulpy pulse pulses puma',
+  'pumas pump pumps punch punk punks punned puns punt punts puny pupa pupae pupal pupas pupil puppy pups pure',
+  'puree purer purge purged purl purls purr purrs purse purser push pushy puss puts putt putted putts putty',
+  'pwned pwns pygmy pylon pyre pyres pyxes quack quad quads quaff quail quails quake qualm quark quart quartz',
+  'quash quasi quay quays queen quell query ques quest queue queues quick quid quids quiet quill quilt quine',
+  'quip quips quire quirk quit quite quits quiver quiz quoit quota quote quoth rabbi rabid race raced raceme',
+  'racer races rack racks racy radar radial radii radio radon raft rafts raga ragas rage raged rages raging',
+  'rags raid raids rail rails rain rains rainy raise raisin raja rajah rajas rake raked rakes rally ramp ramps',
+  'rams ranch random randy rang range rangy rank ranks rant rants rapid rapids raps rapt rare rared rarer rares',
+  'rarity rash rasp rasps raspy rate rated rates ratio ration rats ratty rave raved ravel raven raves rawer',
+  'rawest rayon rays raze razed razes razor razz reach react read reads ready real realm realms reals ream',
+  'reams reap reaps rear rearm rears rebel rebels rebus rebut recap recd recede recta rector recur redid redo',
+  'reds reduce reed reeds reedy reef reefs reek reeks reel reels reeve refer refine refit refs regal regale',
+  'rehab reheat rehi reign rein reins reis relax relay relic relics rely remand remit renal rend rends renege',
+  'renew rent rents reorg repair repay repel reply reps reran reread rerun reset resin resins resp rest rests',
+  'retch retell retry reuse reused revel revise revs revue rework rhea rheas rheum rhino rhyme ribs rice riced',
+  'rices rich riches rick ricks ride rider rides ridge riding rids rife rifer riff riffs rifle rift rifts right',
+  'rigid rigor rigs rile riled riles riling rill rills rime rimed rimes rims rind rinds ring rings rink rinks',
+  'rinse riot riots ripe ripen ripens riper rips rise risen riser rises risk risks risky rite rites ritual',
+  'ritzy rival riven river rivet roach road roads roam roams roan roans roar roars roast robe robed robes robin',
+  'robing robot robs rock rocks rocky rode rodeo rods roes roger rogers rogue roil roils role roles roll rolls',
+  'roman romp romps rood roods roof roofs rook rooks room roomed rooms roomy roost root roots rope roped ropes',
+  'rose roses rosin roster rosy rote rotor rots rouge rough roughs round rouse rout route routs rove roved',
+  'rover roves rowdy rowed rowel rower rowers rows royal rube rubes ruble rubs ruby ruckus ruddy rude ruder',
+  'rued rues ruff ruffs rugby rugs ruin ruing ruins rule ruled ruler rulers rules rumba rummy rumor rump rumps',
+  'rums rune runes rung rungs runic runny runs runt runts runway rupee rural ruse ruses rush rusk rusks rust',
+  'rusts rusty ruts saber sable sables sabre sack sacks sacs sades sadist sadly safe safer safes saga sagas',
+  'sage sager sages sago sags sahib said sail sails saint saints saith sake saki salad sale sales sally salon',
+  'saloon salsa salt salts salty salve salvo samba same sames sampan sand sands sandy sane saner sang sank sans',
+  'sappy saps sarape saree sari saris sash sass sassy satay sate sated sates satin satrap satyr sauce saucy',
+  'sauna save saved saver saves saving savor savvy sawed sawn saws saxes says scab scabs scad scads scag scags',
+  'scald scale scaled scalp scaly scam scamp scams scan scans scant scar scare scares scarf scars scary scat',
+  'scats scene scent school schwa scion scoff scold scone scoop scoot scoots scope score scorn scour scout scow',
+  'scowl scowls scows scram scrap screw scrimp scrip scrod scrog scrub scuba scud scuds scuff scuffs scull scum',
+  'scums scurf seal sealed seals seam seams seamy sear sears seas seat seats secede secs sect sects secy sedan',
+  'sedge seed seeds seedy seek seeker seeks seem seems seen seep seeps seer seers sees segue seize select self',
+  'sell sells semi semis send sends senna sense sensor sent sepal sepia septa sera seraph sere serer serf serfs',
+  'serge serum serve serves servo sets setup seven sever sewage sewed sewer sewn sews sexed sexes sexton shack',
+  'shad shade shads shady shaft shag shags shah shahs shake shaken shaky shale shall shalt sham shame shams',
+  'shank shape shapes shard share shark sharp shave shaves shawl sheaf shear shed sheds sheen sheep sheer sheet',
+  'sheik shekel shelf shell sherd shes shied shies shift shill shim shims shin shine shined shins shiny ship',
+  'ships shire shirk shirr shirt shlep shlepp shoal shock shod shoe shoed shoes shone shoo shook shoon shoos',
+  'shoot shop shops shore shores shorn short shot shots shout shove show shown shows showy shred shrew shrewd',
+  'shroud shrub shrug shtik shuck shun shuns shunt shush shut shuts shyer shying shyly sibyl sick sicks sics',
+  'side sided sides sidle siege sieges sieve sift sifts sigh sighs sight sigma sign signed signs silk silks',
+  'silky sill sills silly silo silos silt silts simian sims since sine sinew sing singe singer sings sink sinks',
+  'sins sinus sips sire sired siren sires sirs sirup sirups sisal sises sissy sitar site sited sites sits situ',
+  'sixes sixth sixty size sized sizer sizes skate skater skeet skein skew skews skid skids skied skier skies',
+  'skiff skill skim skimp skimps skims skin skins skip skips skirt skis skit skits skulk skull skunk skyed slab',
+  'slabs slack slacks slag slags slain slake slam slams slang slant slap slaps slash slat slate slats slave',
+  'slaves slaw slay slays sled sleds sleek sleep sleet sleeve slept slew slews slice slick slid slide slier',
+  'slight slily slim slime slims slimy sling slink slip slips slit slits slob slobs sloe sloes slog slogs sloop',
+  'slop slope slops slosh slot sloth sloths slots slow slows slue slued slues slug slugs slum slump slumps',
+  'slums slung slunk slur slurp slurs slush slyer slyly smack small smart smash smear smell smelly smelt smile',
+  'smirk smit smite smith smithy smock smog smoke smoky smote smug smugly smurf smut smuts snack snafu snag',
+  'snags snail snake snaky snap snaps snare snares snarf snark snarl sneak sneer snide snider sniff snip snipe',
+  'snips snit snits snob snobs snoop snoopy snoot snore snort snot snots snout snow snowed snows snowy snub',
+  'snubs snuck snuff snug snugs soak soaks soap soaps soapy soar soars sober sobs sock socked socks soda sodas',
+  'sods sofa sofas soft softy soggy soil soiled soils solar sold sole soled soles soli solid solo solos sols',
+  'solve solves some sonar song songs sonic sonny sons soon soot sooth sooty soppy sops sore sorely sorer sores',
+  'sorry sort sorta sorts sots sough soul souls sound soup souped soups soupy sour sours souse south sowed',
+  'sower sown sows soya space spaced spacy spade spake spam spams span spank spans spar spare spark spars',
+  'sparse spas spasm spat spate spats spawn spay spays speak spear spec speck specs sped speed speeds spell',
+  'spelt spend spent spew spews spice spicy spider spied spiel spies spike spiky spill spilt spin spine spins',
+  'spiny spiral spire spit spite spits splat splay spline split spoil spoke spoof spook spooks spool spoon',
+  'spoor spore sport spot spots spouse spout sprat spray spree sprier sprig spry spryly spud spuds spume spun',
+  'spur spurn spurs spurt squab squad squall squat squaw squid squirm stab stabs stack staff stag stage stags',
+  'staid stain stair stairs stake stale stalk stall stamp stance stand stank staph star stare stark stars start',
+  'starve stash stat state stats stave stay stays stdio stead steads steak steal steam steed steel steep steer',
+  'steers stein stem stems stent step steps stern stew stews stick sties stiff stiffs stile still stilt sting',
+  'stink stint stir stirs stitch stoat stock stoic stoke stole stoles stomp stone stony stood stool stoop stop',
+  'stops store stored stork storm story stout stove stow stows strait strap straw stray strep strew strewn',
+  'strip strive strop strum strut struts stub stubs stuck stud studs study stuff stump stun stung stunk stuns',
+  'stunt stupid stye styes style styli suave subj sublet subs such suck sucker sucks suds sudsy sued suede sues',
+  'suet sugar suing suit suite suits sulfur sulk sulks sulky sully sumac sumo sump sumps sums sundae sung sunk',
+  'sunny suns sunup super supped sups sure surer surf surfs surge surges surly sushi swab swabs swag swags',
+  'swain swam swami swamp swan swank swanks swans swap swaps sward swarm swash swat swath swats sway sways',
+  'swear sweat sweaty sweep sweet swell swept swift swig swigs swill swim swims swine swing swipe swipes swirl',
+  'swish swoon swoop swop swops sword swore sworn swum swung sylph symbol sync synch syncs synod syrup sysop',
+  'tabbed tabby table taboo tabs tabu tabus tacit tack tacks tacky taco tacos tact tads taffy tags tail tailor',
+  'tails taint take taken taker takes talc tale tales talk talks tall tally talon tamale tame tamed tamer tames',
+  'tamp tamps tams tang tango tangos tangs tangy tank tanks tans tansy tape taped taper tapes tapir taps tardy',
+  'tare tared tares target taro taros tarot tarp tarps tarry tars tart tartly tarts taser task tasks taste',
+  'tasty tats tattoo tatty taunt taupe taut tawny taxed taxes taxi taxis tbsp teach teacup teak teaks teal',
+  'teals team teams tear tears teary teas tease teat teats tech techno techs teed teem teems teen teens teeny',
+  'tees teeth telex tell tells temp temped tempi tempo temps tempt tend tends tenet tennis tenon tenor tens',
+  'tense tent tenth tents tenure tepee tepid term terms tern terns terry terse test tests testy text texts than',
+  'thank thanks that thaw thaws thee thees theft their them theme then there these theses theta they thick',
+  'thief thigh thin thine thing think thins third this thong thorax thorn those thou thous three threw thrice',
+  'throb throe throw thrown thru thrum thud thuds thug thugs thumb thump thunk thus thyme thymi thymus tiara',
+  'tibia tick ticks tics tidal tide tided tides tidier tidy tied tier tiers ties tiff tiffs tiger tight tike',
+  'tikes tilde tile tiled tiles till tilled tills tilt tilts time timed timer times timid tine tines ting tinge',
+  'tingle tings tinny tins tint tints tiny tipi tipis tipple tips tipsy tire tired tires tiro tiros titan tithe',
+  'title titled tizzy toad toads toady toast today toddy toed toes toffy tofu toga togae togas toggle togs toil',
+  'toils toke toked token tokes told toll tolls tomb tombs tomcat tome tomes toms tonal tone toned toner tones',
+  'tong tongs tonic tonne tons tony took tool tools toot tooth toots topaz topic topics tops toque torch tore',
+  'torn tors torsi torso tort torte torts torus toss tossed tost total tote toted totem totes tots touch tough',
+  'toupee tour tours tout touts towed towel tower town towns tows toxic toxin toyed toys trace traced track',
+  'tract trade trail train trains trait tram tramp trams trans trap traps trash trawl tray trays tread treas',
+  'treat treaty tree treed trees trek treks trend tress triad trial tribe tribes trice trick tried tries trig',
+  'trike trill trim trims trio trios trip tripe tripos trips trite trod troll tromp tron trons troop trope',
+  'tropic trot troth trots trout troy troys truce truck true trued truer trues truing truly trump trunk truss',
+  'trust truth tryst tsar tsars ttys tuba tubas tubby tube tubed tuber tubers tubes tubs tuck tucks tuft tufts',
+  'tugs tulip tulle tumid tummy tumor tuna tunas tundra tune tuned tuner tunes tunic tunny tuns turds turf',
+  'turfs turgid turn turns tush tusk tusks tussle tutor tutu tutus tuxes twain twang tweak twee tweed tweet',
+  'twerk twerp twerps twice twig twigs twill twin twine twink twins twirl twist twit twits twos tycoon tying',
+  'tyke tykes type typed types typo typos tyro tyros tzar tzars udder ugly ulcer ulna ulnae ulnas ultra ultras',
+  'umbel umber umiak umped umps unbar unbind uncle uncut under undid undo undue unease unfit unhurt unify union',
+  'unit unite units unity unless unman unpin unpins unsay unsays unset untidy untie until unto unwed unwise',
+  'unzip upend upland upon upped upper upset upside urban urea urge urged urges uric urine urns usage usages',
+  'used user users uses usher using usual usurp usury uteri utter uvula uvular vacua vague vain vale vales',
+  'valet valid valise valor value valve vamp vamps vane vanes vanned vans vape vaped vapes vapid vapor vars',
+  'vary vase vases vast vasts vats vault vaults vaunt veal veep veeps veer veers vegan veil veils vein veins',
+  'veld velds veldt velour venal vend vends venom vent vents venue verb verbal verbs verge verse versus verve',
+  'very vest vests vetch veto vets vexed vexes viable vial vials viand vibe vibes vicar vice viced vices video',
+  'vied vies view views vigil vigor viii vile vilely viler villa vine vines vinyl viol viola viols viper viral',
+  'vireo vireos virus visa visas vise vised vises visit visits visor vista vital viva vivas vivid vixen vizor',
+  'vocal vocals vodka vogue voice void voids voile vole voles vols volt volts vomit vote voted voter voters',
+  'votes vouch vowed vowel vows vying wabbit wack wacko wacks wacky wade waded wader wades wadi wadis wads',
+  'wafer waft wafts wage waged wager wagers wages wagon wags waif waifs wail wails waist wait waits waive',
+  'waiver wake waked waken wakes waldo wale waled wales walk walks wall wallop walls waltz wand wands wane',
+  'waned wanes wanks wanly wanna want wanted wants ward wards ware wares warez warm warmer warms warn warns',
+  'warp warps wars wart warts warty wary wash wasp wasps waste waster watch water watt watts wave waved waver',
+  'waves wavy waxed waxen waxes waxy waylay ways weak weal weals wean weans wear wears weary weave weaver webs',
+  'wedge weds weed weeder weeds weedy week weeks weep weeps weepy weer wees weest weft wefts weigh weir weird',
+  'weirs welch weld welder welds well wells welsh welt welts wench wend wends wens went wept were west wetly',
+  'wets whack whale whaled wham whams wharf what whats wheal wheat wheel whelk whelp when whence whens where',
+  'whet whets whew whey which whiff while whim whims whine whinny whiny whip whips whir whirl whirr whirs whisk',
+  'whist whit white whits whiz whizz whoa whole whom whoop whoops whorl whose whys wick wicks wide widen wider',
+  'widow widows width wield wife wight wigs wigwag wiki wikis wild wilds wile wiled wiles will wills wilt wilts',
+  'wily wimp wimple wimps wimpy wince winch wind winds windy wine wined wines wing wings wink winked winks wino',
+  'winos wins wipe wiped wiper wipes wire wired wires wiry wise wisely wiser wises wish wisp wisps wispy wist',
+  'witch with wits witty wive wives wizes wkly wobble woes woke woken woks wolf wolfs woman womb wombs women',
+  'wonky wont wood wooden woods woody wooed wooer woof woofs wool wooly woos woozy word words wordy wore work',
+  'worked works world worm worms wormy worn worry worse worst worth would wound wove woven wowed wows wrack',
+  'wraith wrap wraps wrapt wrath wreak wreck wren wrens wrest wrier wring wrist wrists writ write writs wrong',
+  'wrote wroth wrung wryer wryly wuss xcii xciv xcix xcvi xcvii xenon xiii xref xrefs xterm xvii xviii xxii',
+  'xxiii xxiv xxix xxvi xxvii xxxi xxxii xxxiv xxxix xxxv xxxvi xylem yacht yack yacked yacks yahoo yaks yams',
+  'yank yanks yaps yard yards yarn yarns yawed yawl yawls yawn yawns yaws yeah yeahs year yearn years yeas',
+  'yeast yeasts yell yells yelp yelps yens yeps yeses yest yeti yews yield yippee yips yock yocks yodel yoga',
+  'yogi yogin yogis yoke yoked yokel yokes yolk yolks yore young your yours yous youth yowl yowls yucca yuck',
+  'yucked yucks yucky yuks yule yummy yuppy yups zany zaps zeal zebra zebu zebus zeds zenned zens zero zeros',
+  'zest zests zeta zilch zinc zincs zing zings zipped zippy zips zits zombi zonal zone zoned zones zoom zooms',
+  'zoos zorch'
+];

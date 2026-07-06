@@ -127,6 +127,11 @@ const KDF_MEM_MIN_KIB = 65536, KDF_MEM_MAX_KIB = 1048576, KDF_TIME_MIN = 2, KDF_
 let _kdf = Object.assign({}, DEFAULT_KDF);
 
 function setKdf(kdf) { _kdf = kdf ? Object.assign({}, DEFAULT_KDF, kdf) : Object.assign({}, DEFAULT_KDF); }
+function getKdf() { return Object.assign({}, _kdf); }
+
+// Serialise a kdf object back to the "a2id|m|t|p" wire/storage form. Mirrors
+// javascript.js's _kdfToString().
+function kdfToString(kdf) { return 'a2id|' + kdf.memorySize + '|' + kdf.iterations + '|' + kdf.parallelism; }
 
 // Parse an `a2id|memKiB|t|p` line (the `kdfparams` file) → a cost object, or null
 // if malformed / out of bounds (caller then falls back to DEFAULT_KDF).
@@ -153,10 +158,11 @@ function clearKeyCache() { _mkCache.clear(); argonPool.terminate(); }
 
 function _argonInProcess(pwBytes, saltBytes, opts) { return argon2idHash(pwBytes, saltBytes, opts); }
 
-async function deriveMasterKey(password, saltBytes) {
+async function deriveMasterKey(password, saltBytes, kdfOverride) {
+    const kdf = kdfOverride || _kdf;
     const opts = {
-        iterations: _kdf.iterations, memorySize: _kdf.memorySize,
-        parallelism: _kdf.parallelism, hashLength: _kdf.hashLength,
+        iterations: kdf.iterations, memorySize: kdf.memorySize,
+        parallelism: kdf.parallelism, hashLength: kdf.hashLength,
     };
     // Cost is part of the cache key (mirrors the browser _mkCache) so a vault
     // re-encrypted at a new cost never reuses a stale key.
@@ -267,19 +273,29 @@ async function computeTotp(base32Secret, timeOffset) {
 }
 
 // ============================================================
-// Vault integrity manifest (vm1) — mirror javascript.js
+// Vault integrity manifest (vm2; vm1 still supported for verifying a legacy
+// manifest) — mirror javascript.js
 // ============================================================
 async function sha256Hex(str) {
     const buf = await subtle.digest('SHA-256', te.encode(str));
     return bytesToHex(new Uint8Array(buf));
 }
-async function manifestHmacHex(pw, pw2, salt1Hex, salt2Hex, revision, timestamp, records) {
+// kdfStr selects the manifest version and the cost the manifest keys derive at:
+//   null   → legacy vm1: derive at the active _kdf, sign "vm1|s1|s2|rev|ts".
+//   string → vm2: derive at the params named by kdfStr (its own declared cost,
+//            so a verifier need not trust the possibly-tampered active cost) and
+//            sign "vm2|s1|s2|rev|ts|kdf".
+async function manifestHmacHex(pw, pw2, salt1Hex, salt2Hex, revision, timestamp, kdfStr, records) {
+    const kdf = kdfStr ? (parseKdf(kdfStr) || _kdf) : _kdf;
     const [mk1, mk2] = await Promise.all([
-        deriveMasterKey(pw, hexToBytes(salt1Hex)), deriveMasterKey(pw2, hexToBytes(salt2Hex))]);
+        deriveMasterKey(pw, hexToBytes(salt1Hex), kdf), deriveMasterKey(pw2, hexToBytes(salt2Hex), kdf)]);
     const ikm = new Uint8Array(64); ikm.set(mk1, 0); ikm.set(mk2, 32);
     const keyBytes = await hkdfBytes(ikm, 'v6|manifest|hmac');
     const ck = await subtle.importKey('raw', keyBytes, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
-    const msg = 'vm1|' + salt1Hex + '|' + salt2Hex + '|' + revision + '|' + timestamp + '\n' + records.join('\n');
+    const header = kdfStr
+        ? 'vm2|' + salt1Hex + '|' + salt2Hex + '|' + revision + '|' + timestamp + '|' + kdfStr
+        : 'vm1|' + salt1Hex + '|' + salt2Hex + '|' + revision + '|' + timestamp;
+    const msg = header + '\n' + records.join('\n');
     const sig = await subtle.sign('HMAC', ck, te.encode(msg));
     return bytesToHex(new Uint8Array(sig));
 }
@@ -292,5 +308,5 @@ module.exports = {
     computeTotp, base32ToBytes,
     sha256Hex, manifestHmacHex, randomSaltHex,
     deriveMasterKey, clearKeyCache,
-    setKdf, parseKdf, DEFAULT_KDF,
+    setKdf, getKdf, parseKdf, kdfToString, DEFAULT_KDF,
 };

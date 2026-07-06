@@ -167,6 +167,17 @@ require_basic_auth();
 $regen = isset($_POST['regen']) || isset($_GET['regen']);
 
 // ---- CSRF / same-origin check ----
+// host[:port] of a URL, matching how browsers build the Host header (and how
+// server.js compares via URL.host). Without the port, any deployment on a
+// non-default port (e.g. :8080) failed the compare — HTTP_HOST carries the
+// port there, parse_url's HOST component never does — and every write 403'd.
+function url_host_with_port($url) {
+    $h = parse_url($url, PHP_URL_HOST);
+    if (!is_string($h) || $h === '') return '';
+    $p = parse_url($url, PHP_URL_PORT);
+    return $p ? $h . ':' . $p : $h;
+}
+
 function is_same_origin() {
     $host = $_SERVER['HTTP_HOST'] ?? '';
     if ($host === '') return false;
@@ -186,15 +197,13 @@ function is_same_origin() {
         // gated, so accept them alongside the same-origin web app.
         $scheme = strtolower(parse_url($origin, PHP_URL_SCHEME) ?? '');
         if ($scheme === 'chrome-extension' || $scheme === 'moz-extension') return true;
-        $origin_host = parse_url($origin, PHP_URL_HOST) ?? '';
-        return $origin_host === $host;
+        return url_host_with_port($origin) === $host;
     }
 
     // Fallback: check Referer (older browsers, Safari in some modes).
     $referer = $_SERVER['HTTP_REFERER'] ?? '';
     if ($referer !== '') {
-        $referer_host = parse_url($referer, PHP_URL_HOST) ?? '';
-        return $referer_host === $host;
+        return url_host_with_port($referer) === $host;
     }
 
     return false;
@@ -240,14 +249,29 @@ function is_valid_record($s) {
 // is only shape-checked and stored opaquely.
 //
 // vm1:  vm1 | salt1HEX(64) | salt2HEX(64) | revision | timestamp | hmacHEX(64)
+// vm2:  vm2 | salt1HEX(64) | salt2HEX(64) | revision | timestamp | kdf | hmacHEX(64)
+// vm2 binds the vault-wide Argon2id cost (the `kdf` field) into the signed set.
+// Both are accepted (a vault re-signs vm1 → vm2 on its next write); validated by
+// shape only — the HMAC is keyed off the master passwords the server never has.
 function is_valid_manifest($s) {
     if (!is_string($s) || strlen($s) > 512) return false;
     $p = explode('|', $s);
-    if (count($p) !== 6 || $p[0] !== 'vm1') return false;
-    foreach (array(1, 2, 5) as $i) {
+    if ($p[0] === 'vm1') {
+        if (count($p) !== 6) return false;
+        $hex = array(1, 2, 5); $dig = array(3, 4);
+    } elseif ($p[0] === 'vm2') {
+        // The kdf field ("a2id|m|t|p") is itself 4 pipe-separated tokens, so a vm2
+        // manifest has 10 fields; the kdf occupies indices 5..8.
+        if (count($p) !== 10) return false;
+        if (!is_valid_kdf($p[5] . '|' . $p[6] . '|' . $p[7] . '|' . $p[8])) return false;
+        $hex = array(1, 2, 9); $dig = array(3, 4);
+    } else {
+        return false;
+    }
+    foreach ($hex as $i) {
         if (strlen($p[$i]) !== 64 || !ctype_xdigit($p[$i])) return false;
     }
-    foreach (array(3, 4) as $i) {
+    foreach ($dig as $i) {
         if ($p[$i] === '' || strlen($p[$i]) > 15 || !ctype_digit($p[$i])) return false;
     }
     return true;
@@ -388,12 +412,15 @@ if (!$regen) {
         }
     } else {
         $data       = isset($_POST['data']) ? $_POST['data'] : null;
-        $de         = isset($_POST['delete']) ? intval($_POST['delete']) : -1;
         $delete_rec = isset($_POST['delete_rec']) ? $_POST['delete_rec'] : null;
 
-        // delete index must be -1 (no delete) or a non-negative integer.
-        // (Legacy path — kept only for clients that predate delete_rec.)
-        if ($de < -1) $de = -1;
+        // The legacy delete-by-index param is gone (removed in 1.1.10): no
+        // shipped client ever sent it, it had no staleness guard, and PHP's
+        // intval() turned any malformed value into "delete record 0". Reject it.
+        if (isset($_POST['delete'])) {
+            http_response_code(400);
+            exit('Invalid data');
+        }
 
         // delete_rec must itself be a well-formed v6 record (it is one of ours)
         if ($delete_rec !== null && !is_valid_record($delete_rec)) {

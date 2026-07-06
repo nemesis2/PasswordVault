@@ -33,6 +33,9 @@ var ASSETS = ['javascript.js', 'argon2-worker.js', 'manifest.json', 'icon.png'];
 // Request paths the SW must never cache or intercept (always go to network).
 var SENSITIVE = /(^|\/)(post|lines|kdfparams|manifest|trash|part1|part2)(\/|$|\?)/i;
 var SENSITIVE_DIR = /(^|\/)(bak|moved)\//i;
+// Never cache key/package build artifacts or operator scripts either — the
+// server denies them (403), and a cached copy would outlive a later deny fix.
+var SENSITIVE_EXT = /\.(pem|crx|xpi|sh)(\?|$)/i;
 
 function isAsset(url) {
     var path = url.pathname;
@@ -87,7 +90,7 @@ self.addEventListener('fetch', function(e) {
     var url;
     try { url = new URL(req.url); } catch (_) { return; }
     if (url.origin !== self.location.origin) return;        // third-party: ignore
-    if (SENSITIVE.test(url.pathname) || SENSITIVE_DIR.test(url.pathname)) return;
+    if (SENSITIVE.test(url.pathname) || SENSITIVE_DIR.test(url.pathname) || SENSITIVE_EXT.test(url.pathname)) return;
 
     // Navigation (the index.html document): network-only, offline fallback.
     // Never cached — it embeds the ciphertext DB.

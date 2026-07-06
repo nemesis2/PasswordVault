@@ -187,8 +187,12 @@ class Vault {
         const salt2Hex = old ? old.salt2Hex : C.randomSaltHex(32);
         const revision = (old ? old.revision : 0) + 1;
         const ts = Math.floor(Date.now() / 1000);
-        const hmac = await C.manifestHmacHex(this.pw, this.pw2, salt1Hex, salt2Hex, revision, ts, recs);
-        const manifest = ['vm1', salt1Hex, salt2Hex, String(revision), String(ts), hmac].join('|');
+        // Always (re-)sign as vm2, binding the active vault-wide Argon2id cost —
+        // matches javascript.js's _signVault(), so a TUI write never downgrades an
+        // existing vm2 manifest back to the un-kdf-bound vm1 shape.
+        const kdfStr = C.kdfToString(C.getKdf());
+        const hmac = await C.manifestHmacHex(this.pw, this.pw2, salt1Hex, salt2Hex, revision, ts, kdfStr, recs);
+        const manifest = ['vm2', salt1Hex, salt2Hex, String(revision), String(ts), kdfStr, hmac].join('|');
         V.writeManifest(manifest);
         this.manifest = manifest;
         return { revision, ts };

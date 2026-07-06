@@ -112,12 +112,25 @@ function main() {
         eq('_csvField doubles quotes', C._csvField('a"b'), '"a""b"');
         eq('_csvField null → empty quoted', C._csvField(null), '""');
 
-        // Round-trip: field → csv → parse must recover the original value.
-        const vals = ['simple', 'with, comma', 'with "quote"', 'multi\nline', ''];
+        // Formula / CSV-injection guard: leading = + - @ (or trimmed tab/CR/LF)
+        // gets an apostrophe so spreadsheets treat it as text, not a formula.
+        eq('_csvField defangs leading =', C._csvField('=1+1'), `"'=1+1"`);
+        eq('_csvField defangs leading +', C._csvField('+cmd'), `"'+cmd"`);
+        eq('_csvField defangs leading -', C._csvField('-2'), `"'-2"`);
+        eq('_csvField defangs leading @', C._csvField('@SUM'), `"'@SUM"`);
+        eq('_csvField defangs leading tab', C._csvField('\t=1'), `"'\t=1"`);
+        eq('_csvField leaves mid-string = alone', C._csvField('a=b'), '"a=b"');
+        eq('_csvUnguard reverses the guard', C._csvUnguard("'=1+1"), '=1+1');
+        eq('_csvUnguard keeps real leading apostrophe', C._csvUnguard("'hello"), "'hello");
+
+        // Round-trip: field → csv → parse → unguard must recover the original,
+        // including values that needed the formula guard.
+        const vals = ['simple', 'with, comma', 'with "quote"', 'multi\nline', '',
+                      '=HYPERLINK("x")', '-leading', '@at', '+plus'];
         const line = vals.map(C._csvField).join(',');
-        const back = C._csvParse(line)[0];
-        check('field/parse round-trip', JSON.stringify(back) === JSON.stringify(vals),
-            JSON.stringify(back));
+        const back = C._csvParse(line)[0].map(C._csvUnguard);
+        check('field/parse round-trip (with formula guard)',
+            JSON.stringify(back) === JSON.stringify(vals), JSON.stringify(back));
     }
 
     console.log('\n_avatarColor / _avatarLetter / _favHash');
@@ -167,6 +180,22 @@ function main() {
         const p = good.split('|'); p[4] = p[4].slice(0, 22);
         check('rejects wrong nonce length', !C._isValidV6Record(p.join('|')));
         check('rejects empty string', !C._isValidV6Record(''));
+    }
+
+    console.log('\n_wordlist / _randomInt (passphrase generator)');
+    {
+        const words = C._wordlist();
+        eq('wordlist flattens to 7776 words', words.length, 7776);
+        eq('wordlist has no duplicates', new Set(words).size, 7776);
+        check('every word is lowercase [a-z]', words.every((w) => /^[a-z]+$/.test(w)));
+        check('_wordlist is cached (same array each call)', C._wordlist() === words);
+        eq('entropy per word ≈ 12.925 bits', Math.log2(words.length).toFixed(3), '12.925');
+
+        // _randomInt must stay in range and cover the space without bias surprises.
+        let lo = Infinity, hi = -Infinity;
+        for (let i = 0; i < 5000; i++) { const r = C._randomInt(words.length); if (r < lo) lo = r; if (r > hi) hi = r; }
+        check('_randomInt stays within [0, n)', lo >= 0 && hi < words.length);
+        check('_randomInt spans a wide range', hi - lo > words.length * 0.8);
     }
 
     console.log('\n' + passed + ' passed, ' + failed + ' failed');

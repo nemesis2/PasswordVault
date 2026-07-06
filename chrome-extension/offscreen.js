@@ -66,6 +66,7 @@ function lock() {
   SESSION.entries = [];
   SESSION.vaultUrl = "";
   SESSION.integrity = null;
+  SESSION.code = null;
   VaultCrypto.clearCache();
   VaultCrypto.terminatePool(); // free worker WASM heaps + drop residual key bytes
   _wipeClipboardIfDirty();     // cancel the auto-clear timer + wipe any copied secret now
@@ -144,7 +145,7 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
           if (a.match !== b.match) return a.match ? -1 : 1;
           return a.name.localeCompare(b.name);
         });
-        return { entries: list, integrity: SESSION.integrity };
+        return { entries: list, integrity: SESSION.integrity, code: SESSION.code };
       }
 
       var entry = SESSION.entries.find(function (e) { return e.id === msg.id; });

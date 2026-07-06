@@ -282,6 +282,7 @@ function lock() {
   SESSION.entries = [];
   SESSION.vaultUrl = "";
   SESSION.integrity = null;
+  SESSION.code = null;
   VaultCrypto.clearCache();
   VaultCrypto.terminatePool(); // free worker WASM heaps + drop residual key bytes
   _wipeClipboardIfDirty();     // cancel the auto-clear timer + wipe any copied secret now
@@ -433,7 +434,7 @@ api.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
         if (!ai) return { ok: false };
         return {
           ok: true, mode: ai.mode, rpId: ai.rpId, rpName: ai.rpName,
-          origin: ai.origin, vaultUrl: ai.vaultUrl, writeUser: "pass",
+          origin: ai.origin, vaultUrl: ai.vaultUrl, writeUser: await _getWriteUser(),
         };
       }
       if (msg.cmd === "approval-candidates") {
@@ -488,6 +489,8 @@ api.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
           pw: rr.pw, pw2: rr.pw2, writeUser: rr.writeUser, writePass: rr.writePass, vaultUrl: ap.vaultUrl,
           targetId: (rr.targetId == null ? null : rr.targetId),
         });
+        // Remember the write username that just worked (prefill next ceremony).
+        if (res && res.ok && rr.writeUser) { try { api.storage.local.set({ writeUser: rr.writeUser }); } catch (e) {} }
         _finishApproval(msg.id, res);
         return { ok: true };
       }
@@ -512,7 +515,7 @@ api.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
           if (a.match !== b.match) return a.match ? -1 : 1;
           return a.name.localeCompare(b.name);
         });
-        return { entries: list, integrity: SESSION.integrity };
+        return { entries: list, integrity: SESSION.integrity, code: SESSION.code };
       }
 
       var entry = SESSION.entries.find(function (e) {
@@ -570,6 +573,14 @@ var _pendingApprovals = {};
 async function _getVaultUrl() {
   try { var s = await api.storage.local.get("vaultUrl"); return (s && s.vaultUrl) || ""; }
   catch (e) { return ""; }
+}
+
+// Basic-Auth write username the approval window prefills. Sticky: the last
+// successfully-used value is stored (approval-submit create path), so a
+// deployment that changed the default isn't stuck retyping it per ceremony.
+async function _getWriteUser() {
+  try { var s = await api.storage.local.get("writeUser"); return (s && s.writeUser) || "pass"; }
+  catch (e) { return "pass"; }
 }
 
 async function _openApproval(info) {

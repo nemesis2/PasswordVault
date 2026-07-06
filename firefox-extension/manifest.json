@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Vault Autofill Companion",
-  "version": "1.1.6",
+  "version": "1.1.11",
   "description": "Unlock your self-hosted encrypted vault and autofill logins. All decryption happens locally in the browser.",
   "browser_specific_settings": {
     "gecko": {
@@ -19,7 +19,7 @@
   ],
   "background": {
     "persistent": true,
-    "scripts": ["crypto-ciphers.js", "crypto-vault.js", "webauthn.js", "vault-session.js", "background.js"]
+    "scripts": ["code-pins.js", "crypto-ciphers.js", "crypto-vault.js", "webauthn.js", "vault-session.js", "background.js"]
   },
   "content_scripts": [
     {
