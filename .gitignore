@@ -16,8 +16,6 @@ moved/
 # --- Extension build artifacts & signing keys (NEVER commit) ---
 *.pem
 *.crx
-*.zip
-*.xpi
 web-ext-artifacts/
 
 # --- Tooling / local ---
